@@ -1,8 +1,20 @@
 # Assay: High-Performance Data Sampling & Schema Inference Engine
 
-`assay` is a lightweight, ultra-fast Go library designed to profile incoming data streams in real-time, infer their schema, and track properties like type probabilities and field requirement (optionality) on-the-fly.
-
-Engineered for hot-path execution in high-throughput data planes, `assay` operates with sub-millisecond overhead and is capable of processing high-volume data streams with sub-microsecond ingestion latency.
+<table>
+  <tr>
+    <td min-width="200" align="center" valign="middle">
+      <img src="assets/mascot.png" alt="Assay Mascot" width="160" height="160" />
+    </td>
+    <td valign="middle">
+      <p>
+        <code>assay</code> is a lightweight, ultra-fast Go library designed to profile incoming data streams in real-time, infer their schema, and track properties like type probabilities and field requirement (optionality) on-the-fly.
+      </p>
+      <p>
+        Engineered for hot-path execution in high-throughput data planes, <code>assay</code> operates with sub-millisecond overhead and is capable of processing high-volume data streams with sub-microsecond ingestion latency.
+      </p>
+    </td>
+  </tr>
+</table>
 
 ---
 

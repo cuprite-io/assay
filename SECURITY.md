@@ -6,7 +6,7 @@ We currently support and provide security updates for the following versions:
 
 | Version | Supported          |
 | ------- | ------------------ |
-| v0.1.x  | :white_check_mark: |
+| v0.x.x  | :white_check_mark: |
 
 ## Reporting a Vulnerability
 
