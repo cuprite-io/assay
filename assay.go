@@ -113,6 +113,9 @@ const numShards = 128
 
 // NewSampler initializes a new Sampler with a backend and configuration.
 func NewSampler(backend StatsBackend, cfg Config) *Sampler {
+	if backend == nil {
+		panic("assay: backend cannot be nil")
+	}
 	if cfg.MaxDepth <= 0 {
 		cfg.MaxDepth = 32
 	}

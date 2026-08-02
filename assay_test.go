@@ -51,6 +51,15 @@ func (m *mockBackend) MapGetAll(ctx context.Context, key string) (map[string]str
 	return res, nil
 }
 
+func TestNewSamplerNilBackend(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Errorf("expected NewSampler to panic on nil backend")
+		}
+	}()
+	assay.NewSampler(nil, assay.Config{})
+}
+
 func TestSampleCorrectness(t *testing.T) {
 	backend := newMockBackend()
 	sampler := assay.NewSampler(backend, assay.Config{
