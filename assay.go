@@ -803,6 +803,13 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 			continue
 		}
 
+		if snap.ObservedCount == 0 {
+			node.Type = "null"
+			node.Probability = map[string]float64{"null": 1.0}
+			node.Required = false
+			continue
+		}
+
 		node.Probability = make(map[string]float64)
 		var maxCount uint64
 		var dominantType string
