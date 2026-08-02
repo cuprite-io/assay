@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"reflect"
 	"sort"
 	"strconv"
@@ -374,6 +375,16 @@ func (s *Sampler) flushLoop() {
 	}
 }
 
+type pathStatsRef struct {
+	path  string
+	stats *pathStats
+}
+
+type fieldUpdate struct {
+	field string
+	count uint64
+}
+
 func (s *Sampler) flushAll() {
 	ctx := context.Background()
 	typeNames := [6]string{"null", "string", "number", "boolean", "object", "array"}
@@ -388,16 +399,18 @@ func (s *Sampler) flushAll() {
 
 		for schemaID, sa := range schemas {
 			sa.mu.RLock()
-			type fieldUpdate struct {
-				field string
-				count uint64
-			}
-			var updates []fieldUpdate
+			statsRefs := make([]pathStatsRef, 0, len(sa.stats))
 			for path, stats := range sa.stats {
+				statsRefs = append(statsRefs, pathStatsRef{path: path, stats: stats})
+			}
+			sa.mu.RUnlock()
+
+			var updates []fieldUpdate
+			for _, ref := range statsRefs {
 				for t := 0; t < 6; t++ {
-					c := atomic.SwapUint64(&stats.types[t], 0)
+					c := atomic.SwapUint64(&ref.stats.types[t], 0)
 					if c > 0 {
-						field := fmt.Sprintf("%s:%s", path, typeNames[t])
+						field := fmt.Sprintf("%s:%s", ref.path, typeNames[t])
 						updates = append(updates, fieldUpdate{
 							field: field,
 							count: c,
@@ -405,10 +418,12 @@ func (s *Sampler) flushAll() {
 					}
 				}
 			}
-			sa.mu.RUnlock()
 
 			for _, u := range updates {
-				_, _ = s.backend.MapIncrementBy(ctx, schemaID, u.field, float64(u.count))
+				_, err := s.backend.MapIncrementBy(ctx, schemaID, u.field, float64(u.count))
+				if err != nil {
+					log.Printf("assay: failed to flush stats for schema %q field %q: %v", schemaID, u.field, err)
+				}
 			}
 		}
 	}
@@ -634,11 +649,11 @@ func skipString(data []byte, pos int) (int, error) {
 func skipBool(data []byte, pos int) (int, error) {
 	switch data[pos] {
 	case 't':
-		if pos+4 <= len(data) && string(data[pos:pos+4]) == "true" {
+		if pos+4 <= len(data) && data[pos+1] == 'r' && data[pos+2] == 'u' && data[pos+3] == 'e' {
 			return pos + 4, nil
 		}
 	case 'f':
-		if pos+5 <= len(data) && string(data[pos:pos+5]) == "false" {
+		if pos+5 <= len(data) && data[pos+1] == 'a' && data[pos+2] == 'l' && data[pos+3] == 's' && data[pos+4] == 'e' {
 			return pos + 5, nil
 		}
 	}
@@ -646,17 +661,24 @@ func skipBool(data []byte, pos int) (int, error) {
 }
 
 func skipNull(data []byte, pos int) (int, error) {
-	if pos+4 <= len(data) && string(data[pos:pos+4]) == "null" {
+	if pos+4 <= len(data) && data[pos] == 'n' && data[pos+1] == 'u' && data[pos+2] == 'l' && data[pos+3] == 'l' {
 		return pos + 4, nil
 	}
 	return pos, fmt.Errorf("expected null at pos %d", pos)
 }
 
 func skipNumber(data []byte, pos int) (int, error) {
+	start := pos
 	for pos < len(data) {
 		c := data[pos]
-		if (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '+' || c == 'e' || c == 'E' {
+		if (c >= '0' && c <= '9') || c == '.' || c == '-' || c == 'e' || c == 'E' {
 			pos++
+		} else if c == '+' {
+			if pos > start && (data[pos-1] == 'e' || data[pos-1] == 'E') {
+				pos++
+			} else {
+				break
+			}
 		} else {
 			break
 		}
