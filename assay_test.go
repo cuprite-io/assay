@@ -481,6 +481,30 @@ func TestDeleteSchema(t *testing.T) {
 	}
 }
 
+type errorBackend struct{}
+
+func (e *errorBackend) MapIncrementBy(ctx context.Context, key, field string, delta float64) (float64, error) {
+	return 0, strconv.ErrRange
+}
+
+func (e *errorBackend) MapGetAll(ctx context.Context, key string) (map[string]string, error) {
+	return nil, strconv.ErrRange
+}
+
+func (e *errorBackend) Delete(ctx context.Context, key string) error {
+	return strconv.ErrRange
+}
+
+func TestGetSchemaBackendError(t *testing.T) {
+	sampler := assay.NewSampler(&errorBackend{}, assay.Config{})
+	defer sampler.Close()
+
+	_, err := sampler.GetSchema(context.Background(), "test-schema")
+	if err == nil {
+		t.Fatal("expected error from GetSchema when backend fails, got nil")
+	}
+}
+
 // Convert struct helper
 func marshal(v any) []byte {
 	b, _ := json.Marshal(v)

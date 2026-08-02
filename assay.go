@@ -246,48 +246,50 @@ func (s *Sampler) GetSchema(ctx context.Context, schemaID string) (*SchemaNode, 
 
 	// Fetch flat snapshot from backend
 	rawStats, err := s.backend.MapGetAll(ctx, schemaID)
-	if err == nil {
-		typeMap := map[string]DataType{
-			"null":    TypeNull,
-			"string":  TypeString,
-			"number":  TypeNumber,
-			"boolean": TypeBoolean,
-			"object":  TypeObject,
-			"array":   TypeArray,
-		}
-		for k, v := range rawStats {
-			idx := strings.LastIndex(k, ":")
-			if idx == -1 {
-				continue
-			}
-			path := k[:idx]
-			typeStr := k[idx+1:]
+	if err != nil {
+		return nil, fmt.Errorf("assay: failed to fetch stats from backend: %w", err)
+	}
 
-			dt, exists := typeMap[typeStr]
-			if !exists {
-				continue
-			}
-
-			count, err := strconv.ParseUint(v, 10, 64)
-			if err != nil {
-				continue
-			}
-
-			snap, ok := merged[path]
-			if !ok {
-				snap = &PathStatsSnapshot{}
-				merged[path] = snap
-			}
-			snap.TypeCounts[dt] = count
+	typeMap := map[string]DataType{
+		"null":    TypeNull,
+		"string":  TypeString,
+		"number":  TypeNumber,
+		"boolean": TypeBoolean,
+		"object":  TypeObject,
+		"array":   TypeArray,
+	}
+	for k, v := range rawStats {
+		idx := strings.LastIndex(k, ":")
+		if idx == -1 {
+			continue
 		}
-		// Compute ObservedCount for backend metrics
-		for _, snap := range merged {
-			var total uint64
-			for _, c := range snap.TypeCounts {
-				total += c
-			}
-			snap.ObservedCount = total
+		path := k[:idx]
+		typeStr := k[idx+1:]
+
+		dt, exists := typeMap[typeStr]
+		if !exists {
+			continue
 		}
+
+		count, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			continue
+		}
+
+		snap, ok := merged[path]
+		if !ok {
+			snap = &PathStatsSnapshot{}
+			merged[path] = snap
+		}
+		snap.TypeCounts[dt] = count
+	}
+	// Compute ObservedCount for backend metrics
+	for _, snap := range merged {
+		var total uint64
+		for _, c := range snap.TypeCounts {
+			total += c
+		}
+		snap.ObservedCount = total
 	}
 
 	// Merge local unflushed stats
