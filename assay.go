@@ -445,7 +445,13 @@ func (s *pathStack) push(key []byte) {
 	if len(s.buf) > 0 {
 		s.buf = append(s.buf, '.')
 	}
-	s.buf = append(s.buf, key...)
+	for _, b := range key {
+		if b == '.' {
+			s.buf = append(s.buf, '\\', '.')
+		} else {
+			s.buf = append(s.buf, b)
+		}
+	}
 }
 
 func (s *pathStack) pop() {
@@ -780,6 +786,35 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 	return nil
 }
 
+func splitPath(path string) []string {
+	var parts []string
+	var current strings.Builder
+	inEscape := false
+
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		if inEscape {
+			current.WriteByte(c)
+			inEscape = false
+			continue
+		}
+
+		if c == '\\' {
+			inEscape = true
+			continue
+		}
+
+		if c == '.' {
+			parts = append(parts, current.String())
+			current.Reset()
+		} else {
+			current.WriteByte(c)
+		}
+	}
+	parts = append(parts, current.String())
+	return parts
+}
+
 func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint64) *SchemaNode {
 	if len(statsMap) == 0 {
 		return &SchemaNode{
@@ -812,15 +847,28 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 	sort.Strings(paths)
 
 	for _, path := range paths {
-		parts := strings.Split(path, ".")
+		parts := splitPath(path)
+		var subpaths []string
+		for _, part := range parts {
+			var escapedPart strings.Builder
+			for i := 0; i < len(part); i++ {
+				if part[i] == '.' {
+					escapedPart.WriteString(`\.`)
+				} else {
+					escapedPart.WriteByte(part[i])
+				}
+			}
+			subpaths = append(subpaths, escapedPart.String())
+		}
 
 		currPath := ""
-		for _, part := range parts {
+		for idx, part := range parts {
+			escapedPart := subpaths[idx]
 			parentPath := currPath
 			if currPath == "" {
-				currPath = part
+				currPath = escapedPart
 			} else {
-				currPath = currPath + "." + part
+				currPath = currPath + "." + escapedPart
 			}
 
 			if _, ok := nodes[currPath]; !ok {

@@ -505,6 +505,37 @@ func TestGetSchemaBackendError(t *testing.T) {
 	}
 }
 
+func TestDottedKeys(t *testing.T) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{})
+	defer sampler.Close()
+
+	ctx := context.Background()
+	schemaID := "dotted-schema"
+
+	err := sampler.Sample(ctx, schemaID, []byte(`{"a.b": 123}`))
+	if err != nil {
+		t.Fatalf("failed to sample: %v", err)
+	}
+
+	node, err := sampler.GetSchema(ctx, schemaID)
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+
+	child := node.Children["a.b"]
+	if child == nil {
+		t.Fatal("expected child 'a.b' to exist")
+	}
+	if child.Type != "number" {
+		t.Errorf("expected type 'number' for 'a.b', got %q", child.Type)
+	}
+
+	if node.Children["a"] != nil {
+		t.Error("unexpected child 'a' found (key splitting collision)")
+	}
+}
+
 // Convert struct helper
 func marshal(v any) []byte {
 	b, _ := json.Marshal(v)
