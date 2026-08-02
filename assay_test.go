@@ -51,6 +51,13 @@ func (m *mockBackend) MapGetAll(ctx context.Context, key string) (map[string]str
 	return res, nil
 }
 
+func (m *mockBackend) Delete(ctx context.Context, key string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.stats, key)
+	return nil
+}
+
 func TestNewSamplerNilBackend(t *testing.T) {
 	defer func() {
 		if r := recover(); r == nil {
@@ -432,6 +439,45 @@ func TestTreeReconstructionCorrectness(t *testing.T) {
 	}
 	if email.Probability["null"] != 0.2 || email.Probability["string"] != 0.8 {
 		t.Errorf("incorrect probabilities: %v", email.Probability)
+	}
+}
+
+func TestDeleteSchema(t *testing.T) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{
+		MaxDepth:      10,
+		MaxPaths:      100,
+		FlushInterval: 10 * time.Second,
+	})
+	defer sampler.Close()
+
+	ctx := context.Background()
+	schemaID := "temp-schema"
+
+	err := sampler.Sample(ctx, schemaID, []byte(`{"id": 1}`))
+	if err != nil {
+		t.Fatalf("failed to sample: %v", err)
+	}
+
+	node, err := sampler.GetSchema(ctx, schemaID)
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+	if node.Children["id"] == nil {
+		t.Fatal("expected 'id' node to exist before delete")
+	}
+
+	err = sampler.DeleteSchema(ctx, schemaID)
+	if err != nil {
+		t.Fatalf("failed to delete schema: %v", err)
+	}
+
+	node2, err := sampler.GetSchema(ctx, schemaID)
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+	if node2.Children["id"] != nil {
+		t.Error("expected 'id' node to be deleted from both local memory and backend cache")
 	}
 }
 

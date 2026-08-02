@@ -82,12 +82,13 @@ func main() {
 
 ## 🔌 Decoupled Storage Interface (`StatsBackend`)
 
-To plug Assay into your cache layer, implement the `StatsBackend` interface. Because Go utilizes structural typing, any struct implementing `MapIncrementBy` and `MapGetAll` fits this contract automatically.
+To plug Assay into your cache layer, implement the `StatsBackend` interface. Because Go utilizes structural typing, any struct implementing `MapIncrementBy`, `MapGetAll`, and `Delete` fits this contract automatically.
 
 ```go
 type StatsBackend interface {
 	MapIncrementBy(ctx context.Context, key, field string, delta float64) (float64, error)
 	MapGetAll(ctx context.Context, key string) (map[string]string, error)
+	Delete(ctx context.Context, key string) error
 }
 ```
 

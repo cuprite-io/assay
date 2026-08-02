@@ -70,10 +70,11 @@ type PathStatsSnapshot struct {
 }
 
 // StatsBackend represents the abstraction layer for stats storage.
-// It matches Capacitor's MapIncrementBy and MapGetAll methods, enabling implicit integration.
+// It matches Capacitor's MapIncrementBy, MapGetAll, and Delete methods, enabling implicit integration.
 type StatsBackend interface {
 	MapIncrementBy(ctx context.Context, key, field string, delta float64) (float64, error)
 	MapGetAll(ctx context.Context, key string) (map[string]string, error)
+	Delete(ctx context.Context, key string) error
 }
 
 // Config defines execution and limits for safety.
@@ -171,6 +172,18 @@ func (s *Sampler) Close() error {
 	case <-time.After(5 * time.Second):
 		return errors.New("assay: close timed out waiting for background flush to finish")
 	}
+}
+
+// DeleteSchema removes a schema ID and all its accumulated stats from local memory
+// and deletes the schema's metrics from the persistent stats backend.
+func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
+	h := fnvHash(schemaID) % numShards
+	shard := s.shards[h]
+	shard.mu.Lock()
+	delete(shard.schemas, schemaID)
+	shard.mu.Unlock()
+
+	return s.backend.Delete(ctx, schemaID)
 }
 
 // Sample parses the incoming payload and updates stats in the local buffer.
