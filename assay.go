@@ -155,10 +155,22 @@ func NewSampler(backend StatsBackend, cfg Config) *Sampler {
 }
 
 // Close flushes any pending stats and shuts down the background flushing worker.
+// It returns an error if the shutdown or final flush timed out.
 func (s *Sampler) Close() error {
 	close(s.quit)
-	s.wg.Wait()
-	return nil
+
+	done := make(chan struct{})
+	go func() {
+		s.wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("assay: close timed out waiting for background flush to finish")
+	}
 }
 
 // Sample parses the incoming payload and updates stats in the local buffer.
