@@ -507,6 +507,7 @@ func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth int, ca
 		stack.push(key)
 		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, callback)
 		if err != nil {
+			stack.pop()
 			return nextPos, err
 		}
 		pos = nextPos
@@ -535,6 +536,7 @@ func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth int, cal
 	pos++ // skip '['
 
 	stack.push([]byte("*"))
+	defer stack.pop()
 
 	for {
 		pos = skipWhitespace(data, pos)
@@ -543,7 +545,6 @@ func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth int, cal
 		}
 		if data[pos] == ']' {
 			pos++
-			stack.pop()
 			return pos, nil
 		}
 
@@ -563,7 +564,6 @@ func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth int, cal
 		}
 		if data[pos] == ']' {
 			pos++
-			stack.pop()
 			return pos, nil
 		}
 		return pos, fmt.Errorf("expected ',' or ']' at pos %d, got %q", pos, data[pos])
@@ -678,6 +678,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 			}
 			stack.push([]byte(name))
 			if err := reflectTraverse(v.Field(i), stack, depth+1, maxDepth, callback); err != nil {
+				stack.pop()
 				return err
 			}
 			stack.pop()
@@ -688,6 +689,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 			if key.Kind() == reflect.String {
 				stack.push([]byte(key.String()))
 				if err := reflectTraverse(v.MapIndex(key), stack, depth+1, maxDepth, callback); err != nil {
+					stack.pop()
 					return err
 				}
 				stack.pop()
@@ -698,6 +700,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 		stack.push([]byte("*"))
 		for i := 0; i < v.Len(); i++ {
 			if err := reflectTraverse(v.Index(i), stack, depth+1, maxDepth, callback); err != nil {
+				stack.pop()
 				return err
 			}
 		}

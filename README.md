@@ -10,7 +10,7 @@ Engineered for hot-path execution in high-throughput data planes, `assay` operat
 
 ---
 
-## Features
+## ✨ Key Features
 * **Dynamic Schema Inference:** Infers root-level and deeply nested object/array schemas on raw JSON bytes or native Go values (structs, maps).
 * **Type Probability Tracking:** Computes type distribution percentage per key path (e.g., how often `user.age` is a `string` vs. a `number`).
 * **Optionality Detection:** Evaluates field requirement recursively relative to parent objects based on observed frequencies.
@@ -20,7 +20,7 @@ Engineered for hot-path execution in high-throughput data planes, `assay` operat
 
 ---
 
-## Installation
+## 📦 Installation
 
 ```bash
 go get github.com/cuprite-io/assay
@@ -28,7 +28,7 @@ go get github.com/cuprite-io/assay
 
 ---
 
-## Public API Design
+## 🚀 Public API Design
 
 Assay exposes a minimal public surface, keeping internal data structures and parsing state private.
 
@@ -80,7 +80,7 @@ func main() {
 
 ---
 
-## Decoupled Storage Interface (`StatsBackend`)
+## 🔌 Decoupled Storage Interface (`StatsBackend`)
 
 To plug Assay into your cache layer, implement the `StatsBackend` interface. Because Go utilizes structural typing, any struct implementing `MapIncrementBy` and `MapGetAll` fits this contract automatically.
 
@@ -116,7 +116,7 @@ func main() {
 
 ---
 
-## Mathematical Model
+## 🧮 Mathematical Model
 
 ### Type Probability
 For a path $p$, the probability of type $T$ is computed as:
@@ -128,6 +128,6 @@ $$\text{IsRequired}(p) = \left( \text{Observations}(p) == \text{Observations}(pa
 
 ---
 
-## License
+## 📄 License
 
 Assay is licensed under the Apache License, Version 2.0. See [LICENSE](file:///home/shantanu/Projects/cuprite-io/assay/LICENSE) for the full text.
