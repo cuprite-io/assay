@@ -1,0 +1,103 @@
+package assay_test
+
+import (
+	"context"
+	"testing"
+
+	"github.com/cuprite-io/assay"
+)
+
+func BenchmarkSampleSimple(b *testing.B) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	defer sampler.Close()
+
+	payload := []byte(`{"id":123}`)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sampler.Sample(ctx, "bench-simple", payload)
+	}
+}
+
+func BenchmarkSampleFlatMedium(b *testing.B) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	defer sampler.Close()
+
+	payload := []byte(`{"id":123,"name":"Alice","active":true,"age":30,"email":"alice@example.com","score":99.5}`)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sampler.Sample(ctx, "bench-medium", payload)
+	}
+}
+
+func BenchmarkSampleNestedDeep(b *testing.B) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	defer sampler.Close()
+
+	payload := []byte(`{
+		"user": {
+			"id": "usr_100",
+			"profile": {
+				"name": {
+					"first": "Alice",
+					"last": "Smith"
+				},
+				"address": {
+					"city": "San Francisco",
+					"state": "CA",
+					"zip": 94107,
+					"coordinates": {
+						"lat": 37.7749,
+						"lng": -122.4194
+					}
+				},
+				"tags": ["admin", "staff", "developer"]
+			}
+		}
+	}`)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sampler.Sample(ctx, "bench-deep", payload)
+	}
+}
+
+func BenchmarkSampleGoStructMedium(b *testing.B) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	defer sampler.Close()
+
+	type Profile struct {
+		Name  string `json:"name"`
+		Age   int    `json:"age"`
+		Email string `json:"email"`
+	}
+	type User struct {
+		ID      int     `json:"id"`
+		Active  bool    `json:"active"`
+		Profile Profile `json:"profile"`
+	}
+
+	u := User{
+		ID:     123,
+		Active: true,
+		Profile: Profile{
+			Name:  "Alice",
+			Age:   30,
+			Email: "alice@example.com",
+		},
+	}
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = sampler.Sample(ctx, "bench-struct", u)
+	}
+}
