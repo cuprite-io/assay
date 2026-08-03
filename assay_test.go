@@ -59,18 +59,25 @@ func (m *mockBackend) Delete(ctx context.Context, key string) error {
 	return nil
 }
 
+func mustNewSampler(t *testing.T, backend assay.StatsBackend, cfg assay.Config) *assay.Sampler {
+	t.Helper()
+	s, err := assay.NewSampler(backend, cfg)
+	if err != nil {
+		t.Fatalf("failed to create sampler: %v", err)
+	}
+	return s
+}
+
 func TestNewSamplerNilBackend(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Errorf("expected NewSampler to panic on nil backend")
-		}
-	}()
-	assay.NewSampler(nil, assay.Config{})
+	_, err := assay.NewSampler(nil, assay.Config{})
+	if err == nil {
+		t.Errorf("expected NewSampler to return error on nil backend")
+	}
 }
 
 func TestSampleCorrectness(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      100,
 		FlushInterval: 10 * time.Millisecond,
@@ -126,7 +133,7 @@ func TestSampleCorrectness(t *testing.T) {
 
 func TestOptionalityAndProbability(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      100,
 		FlushInterval: 10 * time.Millisecond,
@@ -192,7 +199,7 @@ func TestOptionalityAndProbability(t *testing.T) {
 
 func TestNestedDataAndArrays(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      100,
 		FlushInterval: 10 * time.Millisecond,
@@ -244,7 +251,7 @@ func TestNestedDataAndArrays(t *testing.T) {
 
 func TestGoStructsAndMaps(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      100,
 		FlushInterval: 10 * time.Millisecond,
@@ -303,7 +310,7 @@ func TestMaxDepthAndMaxPathsLimits(t *testing.T) {
 	backend := newMockBackend()
 
 	t.Run("Max Depth", func(t *testing.T) {
-		sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 2})
+		sampler := mustNewSampler(t, backend, assay.Config{MaxDepth: 2})
 		defer sampler.Close()
 
 		// Deep nesting (3 levels)
@@ -315,7 +322,7 @@ func TestMaxDepthAndMaxPathsLimits(t *testing.T) {
 	})
 
 	t.Run("Max Paths", func(t *testing.T) {
-		sampler := assay.NewSampler(backend, assay.Config{MaxPaths: 3})
+		sampler := mustNewSampler(t, backend, assay.Config{MaxPaths: 3})
 		defer sampler.Close()
 
 		// We have root "", "a", "b", "c", which is 4 paths. MaxPaths is 3.
@@ -340,7 +347,7 @@ func TestMaxDepthAndMaxPathsLimits(t *testing.T) {
 
 func TestLocalAggregationAndFlush(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      100,
 		FlushInterval: 50 * time.Millisecond,
@@ -443,7 +450,7 @@ func TestTreeReconstructionCorrectness(t *testing.T) {
 
 func TestDeleteSchema(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      100,
 		FlushInterval: 10 * time.Second,
@@ -495,7 +502,7 @@ func (e *errorBackend) Delete(ctx context.Context, key string) error {
 }
 
 func TestGetSchemaBackendError(t *testing.T) {
-	sampler := assay.NewSampler(&errorBackend{}, assay.Config{})
+	sampler := mustNewSampler(t, &errorBackend{}, assay.Config{})
 	defer sampler.Close()
 
 	_, err := sampler.GetSchema(context.Background(), "test-schema")
@@ -506,7 +513,7 @@ func TestGetSchemaBackendError(t *testing.T) {
 
 func TestDottedKeys(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{})
+	sampler := mustNewSampler(t, backend, assay.Config{})
 	defer sampler.Close()
 
 	ctx := context.Background()
@@ -537,7 +544,7 @@ func TestDottedKeys(t *testing.T) {
 
 func TestMaxArrayElementsLimit(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxArrayElements: 3,
 	})
 	defer sampler.Close()
@@ -574,7 +581,7 @@ func TestMaxArrayElementsLimit(t *testing.T) {
 
 func TestMaxArrayElementsLimitReflect(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxArrayElements: 2,
 	})
 	defer sampler.Close()
@@ -615,92 +622,88 @@ func marshal(v any) []byte {
 func TestConfigValidation(t *testing.T) {
 	backend := newMockBackend()
 
-	tests := []struct {
-		name     string
-		input    assay.Config
-		expected assay.Config
-	}{
-		{
-			name: "excessive limits clamped to defaults",
-			input: assay.Config{
-				MaxDepth:         999,
-				MaxPaths:         999_999,
-				MaxSchemas:       999_999,
-				MaxArrayElements: 99_999,
-				FlushInterval:    99 * time.Second,
-			},
-			expected: assay.Config{
-				MaxDepth:         32,
-				MaxPaths:         1000,
-				MaxSchemas:       1000,
-				MaxArrayElements: 10,
-				FlushInterval:    100 * time.Millisecond,
-			},
-		},
-		{
-			name: "negative limits clamped to defaults",
-			input: assay.Config{
-				MaxDepth:         -1,
-				MaxPaths:         -100,
-				MaxSchemas:       -10,
-				MaxArrayElements: -5,
-				FlushInterval:    -10 * time.Second,
-			},
-			expected: assay.Config{
-				MaxDepth:         32,
-				MaxPaths:         1000,
-				MaxSchemas:       1000,
-				MaxArrayElements: 10,
-				FlushInterval:    100 * time.Millisecond,
-			},
-		},
-		{
-			name: "valid custom limits preserved",
-			input: assay.Config{
-				MaxDepth:         10,
-				MaxPaths:         2000,
-				MaxSchemas:       500,
-				MaxArrayElements: 50,
-				FlushInterval:    500 * time.Millisecond,
-			},
-			expected: assay.Config{
-				MaxDepth:         10,
-				MaxPaths:         2000,
-				MaxSchemas:       500,
-				MaxArrayElements: 50,
-				FlushInterval:    500 * time.Millisecond,
-			},
-		},
-	}
+	t.Run("defaults for zero values", func(t *testing.T) {
+		sampler, err := assay.NewSampler(backend, assay.Config{})
+		if err != nil {
+			t.Fatalf("failed to create sampler: %v", err)
+		}
+		defer sampler.Close()
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			sampler := assay.NewSampler(backend, tc.input)
-			defer sampler.Close()
+		cfg := sampler.Config()
+		if cfg.MaxDepth != 32 {
+			t.Errorf("expected MaxDepth 32, got %d", cfg.MaxDepth)
+		}
+		if cfg.MaxPaths != 1000 {
+			t.Errorf("expected MaxPaths 1000, got %d", cfg.MaxPaths)
+		}
+		if cfg.MaxSchemas != 1000 {
+			t.Errorf("expected MaxSchemas 1000, got %d", cfg.MaxSchemas)
+		}
+		if cfg.MaxArrayElements != 10 {
+			t.Errorf("expected MaxArrayElements 10, got %d", cfg.MaxArrayElements)
+		}
+		if cfg.FlushInterval != 100*time.Millisecond {
+			t.Errorf("expected FlushInterval 100ms, got %v", cfg.FlushInterval)
+		}
+	})
 
-			cfg := sampler.Config()
-			if cfg.MaxDepth != tc.expected.MaxDepth {
-				t.Errorf("expected MaxDepth %d, got %d", tc.expected.MaxDepth, cfg.MaxDepth)
-			}
-			if cfg.MaxPaths != tc.expected.MaxPaths {
-				t.Errorf("expected MaxPaths %d, got %d", tc.expected.MaxPaths, cfg.MaxPaths)
-			}
-			if cfg.MaxSchemas != tc.expected.MaxSchemas {
-				t.Errorf("expected MaxSchemas %d, got %d", tc.expected.MaxSchemas, cfg.MaxSchemas)
-			}
-			if cfg.MaxArrayElements != tc.expected.MaxArrayElements {
-				t.Errorf("expected MaxArrayElements %d, got %d", tc.expected.MaxArrayElements, cfg.MaxArrayElements)
-			}
-			if cfg.FlushInterval != tc.expected.FlushInterval {
-				t.Errorf("expected FlushInterval %v, got %v", tc.expected.FlushInterval, cfg.FlushInterval)
-			}
+	t.Run("valid custom limits preserved", func(t *testing.T) {
+		sampler, err := assay.NewSampler(backend, assay.Config{
+			MaxDepth:         10,
+			MaxPaths:         2000,
+			MaxSchemas:       500,
+			MaxArrayElements: 50,
+			FlushInterval:    500 * time.Millisecond,
 		})
-	}
+		if err != nil {
+			t.Fatalf("failed to create sampler: %v", err)
+		}
+		defer sampler.Close()
+
+		cfg := sampler.Config()
+		if cfg.MaxDepth != 10 {
+			t.Errorf("expected MaxDepth 10, got %d", cfg.MaxDepth)
+		}
+		if cfg.MaxPaths != 2000 {
+			t.Errorf("expected MaxPaths 2000, got %d", cfg.MaxPaths)
+		}
+		if cfg.MaxSchemas != 500 {
+			t.Errorf("expected MaxSchemas 500, got %d", cfg.MaxSchemas)
+		}
+		if cfg.MaxArrayElements != 50 {
+			t.Errorf("expected MaxArrayElements 50, got %d", cfg.MaxArrayElements)
+		}
+		if cfg.FlushInterval != 500*time.Millisecond {
+			t.Errorf("expected FlushInterval 500ms, got %v", cfg.FlushInterval)
+		}
+	})
+
+	t.Run("invalid configs return error", func(t *testing.T) {
+		invalidConfigs := []assay.Config{
+			{MaxDepth: -1},
+			{MaxDepth: 999},
+			{MaxPaths: -5},
+			{MaxPaths: 999_999},
+			{MaxSchemas: -2},
+			{MaxSchemas: 999_999},
+			{MaxArrayElements: -1},
+			{MaxArrayElements: 99_999},
+			{FlushInterval: -1 * time.Second},
+			{FlushInterval: 99 * time.Second},
+		}
+
+		for _, cfg := range invalidConfigs {
+			_, err := assay.NewSampler(backend, cfg)
+			if err == nil {
+				t.Errorf("expected error for invalid config %+v, got nil", cfg)
+			}
+		}
+	})
 }
 
 func TestMaxSchemasLimit(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxSchemas: 3,
 	})
 	defer sampler.Close()
@@ -748,7 +751,7 @@ func TestMaxSchemasLimit(t *testing.T) {
 
 func TestConcurrentOperations(t *testing.T) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{
+	sampler := mustNewSampler(t, backend, assay.Config{
 		MaxDepth:      10,
 		MaxPaths:      1000,
 		MaxSchemas:    100,
@@ -792,4 +795,67 @@ func TestConcurrentOperations(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestCloseGuardAndOnError(t *testing.T) {
+	backend := newMockBackend()
+	var errRecorded error
+	var mu sync.Mutex
+
+	sampler := mustNewSampler(t, backend, assay.Config{
+		FlushInterval: 10 * time.Millisecond,
+		OnError: func(err error) {
+			mu.Lock()
+			errRecorded = err
+			mu.Unlock()
+		},
+	})
+
+	ctx := context.Background()
+
+	// 1. Test close guard on Sample & GetSchema
+	if err := sampler.Close(); err != nil {
+		t.Fatalf("unexpected error closing sampler: %v", err)
+	}
+
+	err := sampler.Sample(ctx, "test-schema", []byte(`{"id": 1}`))
+	if err != assay.ErrClosed {
+		t.Errorf("expected ErrClosed on Sample, got %v", err)
+	}
+
+	_, err = sampler.GetSchema(ctx, "test-schema")
+	if err != assay.ErrClosed {
+		t.Errorf("expected ErrClosed on GetSchema, got %v", err)
+	}
+
+	// 2. Test OnError callback and Close error propagation
+	// Create another sampler with an erroring backend
+	errSampler, err := assay.NewSampler(&errorBackend{}, assay.Config{
+		FlushInterval: 5 * time.Millisecond,
+		OnError: func(err error) {
+			mu.Lock()
+			errRecorded = err
+			mu.Unlock()
+		},
+	})
+	if err != nil {
+		t.Fatalf("failed to create sampler: %v", err)
+	}
+
+	// Sample one item so that there is something to flush
+	_ = errSampler.Sample(ctx, "error-schema", []byte(`{"id": 1}`))
+
+	// Close it. It should trigger the final flush and return the error.
+	closeErr := errSampler.Close()
+	if closeErr == nil {
+		t.Error("expected error on Close from erroring backend, got nil")
+	}
+
+	mu.Lock()
+	recorded := errRecorded
+	mu.Unlock()
+
+	if recorded == nil {
+		t.Error("expected OnError callback to have been invoked on flush failure, got nil")
+	}
 }

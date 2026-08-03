@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"reflect"
 	"sort"
 	"strconv"
@@ -16,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.4.3"
+const Version = "0.5.0"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -88,6 +87,7 @@ type Config struct {
 	MaxSchemas       int           // Prevents unbounded schema creation (Default: 1000)
 	MaxArrayElements int           // Max array/slice elements profiled (Default: 10)
 	FlushInterval    time.Duration // Interval for buffering writes to stats backend (Default: 100ms)
+	OnError          func(error)   // Optional callback to handle flush or background errors
 }
 
 // Sampler is the entrypoint coordinator.
@@ -102,6 +102,12 @@ type Sampler struct {
 	wg   sync.WaitGroup
 
 	activeSchemas int64
+
+	closed       atomic.Bool
+	ctx          context.Context
+	cancel       context.CancelFunc
+	mu           sync.Mutex
+	lastFlushErr error
 }
 
 type schemaShard struct {
@@ -121,23 +127,40 @@ type pathStats struct {
 const numShards = 128
 
 // NewSampler initializes a new Sampler with a backend and configuration.
-func NewSampler(backend StatsBackend, cfg Config) *Sampler {
+func NewSampler(backend StatsBackend, cfg Config) (*Sampler, error) {
 	if backend == nil {
-		panic("assay: backend cannot be nil")
+		return nil, errors.New("assay: backend cannot be nil")
 	}
-	if cfg.MaxDepth <= 0 || cfg.MaxDepth > 256 {
+	if cfg.MaxDepth < 0 || cfg.MaxDepth > 256 {
+		return nil, fmt.Errorf("assay: invalid MaxDepth %d (must be between 0 and 256)", cfg.MaxDepth)
+	}
+	if cfg.MaxPaths < 0 || cfg.MaxPaths > 100_000 {
+		return nil, fmt.Errorf("assay: invalid MaxPaths %d (must be between 0 and 100,000)", cfg.MaxPaths)
+	}
+	if cfg.MaxSchemas < 0 || cfg.MaxSchemas > 100_000 {
+		return nil, fmt.Errorf("assay: invalid MaxSchemas %d (must be between 0 and 100,000)", cfg.MaxSchemas)
+	}
+	if cfg.MaxArrayElements < 0 || cfg.MaxArrayElements > 10000 {
+		return nil, fmt.Errorf("assay: invalid MaxArrayElements %d (must be between 0 and 10,000)", cfg.MaxArrayElements)
+	}
+	if cfg.FlushInterval < 0 || cfg.FlushInterval > 60*time.Second {
+		return nil, fmt.Errorf("assay: invalid FlushInterval %v (must be between 0 and 60 seconds)", cfg.FlushInterval)
+	}
+
+	// Apply defaults for zero values
+	if cfg.MaxDepth == 0 {
 		cfg.MaxDepth = 32
 	}
-	if cfg.MaxPaths <= 0 || cfg.MaxPaths > 100_000 {
+	if cfg.MaxPaths == 0 {
 		cfg.MaxPaths = 1000
 	}
-	if cfg.MaxSchemas <= 0 || cfg.MaxSchemas > 100_000 {
+	if cfg.MaxSchemas == 0 {
 		cfg.MaxSchemas = 1000
 	}
-	if cfg.MaxArrayElements <= 0 || cfg.MaxArrayElements > 10000 {
+	if cfg.MaxArrayElements == 0 {
 		cfg.MaxArrayElements = 10
 	}
-	if cfg.FlushInterval <= 0 || cfg.FlushInterval > 60*time.Second {
+	if cfg.FlushInterval == 0 {
 		cfg.FlushInterval = 100 * time.Millisecond
 	}
 
@@ -147,6 +170,8 @@ func NewSampler(backend StatsBackend, cfg Config) *Sampler {
 			schemas: make(map[string]*schemaAccumulator),
 		}
 	}
+
+	ctx, cancel := context.WithCancel(context.Background())
 
 	s := &Sampler{
 		backend: backend,
@@ -160,18 +185,23 @@ func NewSampler(backend StatsBackend, cfg Config) *Sampler {
 				}
 			},
 		},
-		quit: make(chan struct{}),
+		quit:   make(chan struct{}),
+		ctx:    ctx,
+		cancel: cancel,
 	}
 
 	s.wg.Add(1)
 	go s.flushLoop()
 
-	return s
+	return s, nil
 }
 
 // Close flushes any pending stats and shuts down the background flushing worker.
-// It returns an error if the shutdown or final flush timed out.
+// It returns an error if the shutdown or final flush timed out or failed.
 func (s *Sampler) Close() error {
+	if s.closed.Swap(true) {
+		return errors.New("assay: sampler already closed")
+	}
 	close(s.quit)
 
 	done := make(chan struct{})
@@ -182,15 +212,20 @@ func (s *Sampler) Close() error {
 
 	select {
 	case <-done:
-		return nil
+		s.mu.Lock()
+		err := s.lastFlushErr
+		s.mu.Unlock()
+		return err
 	case <-time.After(5 * time.Second):
+		s.cancel() // Cancel any pending/hung context
 		return errors.New("assay: close timed out waiting for background flush to finish")
 	}
 }
 
 // Flush forces an immediate synchronous flush of all locally accumulated statistics to the backend.
-func (s *Sampler) Flush() {
-	s.flushAll()
+// It returns an error if any flush operation failed.
+func (s *Sampler) Flush() error {
+	return s.flushAll()
 }
 
 // DeleteSchema removes a schema ID and all its accumulated stats from local memory
@@ -211,6 +246,9 @@ func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
 // Sample parses the incoming payload and updates stats in the local buffer.
 // payload can be: []byte (JSON), map[string]any, or a Struct pointer.
 func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
 	if payload == nil {
 		return errors.New("nil payload")
 	}
@@ -267,6 +305,9 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 
 // GetSchema reconstructs and returns the computed schema tree from the backend metrics.
 func (s *Sampler) GetSchema(ctx context.Context, schemaID string) (*SchemaNode, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
 	merged := make(map[string]*PathStatsSnapshot)
 
 	// Fetch flat snapshot from backend
@@ -396,10 +437,13 @@ func (s *Sampler) flushLoop() {
 	for {
 		select {
 		case <-s.quit:
-			s.flushAll()
+			err := s.flushAll()
+			s.mu.Lock()
+			s.lastFlushErr = err
+			s.mu.Unlock()
 			return
 		case <-ticker.C:
-			s.flushAll()
+			_ = s.flushAll()
 		}
 	}
 }
@@ -414,9 +458,12 @@ type fieldUpdate struct {
 	count uint64
 }
 
-func (s *Sampler) flushAll() {
-	ctx := context.Background()
+func (s *Sampler) flushAll() error {
+	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+	defer cancel()
+
 	typeNames := [6]string{"null", "string", "number", "boolean", "object", "array"}
+	var errs []error
 
 	for _, shard := range s.shards {
 		shard.mu.RLock()
@@ -451,11 +498,17 @@ func (s *Sampler) flushAll() {
 			for _, u := range updates {
 				_, err := s.backend.MapIncrementBy(ctx, schemaID, u.field, float64(u.count))
 				if err != nil {
-					log.Printf("assay: failed to flush stats for schema %q field %q: %v", schemaID, u.field, err)
+					flushErr := fmt.Errorf("failed to flush stats for schema %q field %q: %w", schemaID, u.field, err)
+					errs = append(errs, flushErr)
+					if s.config.OnError != nil {
+						s.config.OnError(flushErr)
+					}
 				}
 			}
 		}
 	}
+
+	return errors.Join(errs...)
 }
 
 // pathStack is a reusable byte slice stack for constructing paths without allocations.
@@ -502,6 +555,9 @@ var ErrMaxDepthExceeded = errors.New("maximum JSON nesting depth exceeded")
 
 // ErrMaxSchemasExceeded is returned when the maximum number of active schemas is reached.
 var ErrMaxSchemasExceeded = errors.New("maximum schema count exceeded")
+
+// ErrClosed is returned when an operation is performed on a closed sampler.
+var ErrClosed = errors.New("assay: sampler is closed")
 
 // parseJSON processes raw JSON bytes and extracts paths.
 func parseJSON(data []byte, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {

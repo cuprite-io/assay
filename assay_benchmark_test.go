@@ -9,7 +9,10 @@ import (
 
 func BenchmarkSampleSimple(b *testing.B) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	sampler, err := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	if err != nil {
+		b.Fatalf("failed to create sampler: %v", err)
+	}
 	defer sampler.Close()
 
 	payload := []byte(`{"id":123}`)
@@ -23,7 +26,10 @@ func BenchmarkSampleSimple(b *testing.B) {
 
 func BenchmarkSampleFlatMedium(b *testing.B) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	sampler, err := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	if err != nil {
+		b.Fatalf("failed to create sampler: %v", err)
+	}
 	defer sampler.Close()
 
 	payload := []byte(`{"id":123,"name":"Alice","active":true,"age":30,"email":"alice@example.com","score":99.5}`)
@@ -37,7 +43,10 @@ func BenchmarkSampleFlatMedium(b *testing.B) {
 
 func BenchmarkSampleNestedDeep(b *testing.B) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	sampler, err := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	if err != nil {
+		b.Fatalf("failed to create sampler: %v", err)
+	}
 	defer sampler.Close()
 
 	payload := []byte(`{
@@ -71,7 +80,10 @@ func BenchmarkSampleNestedDeep(b *testing.B) {
 
 func BenchmarkSampleGoStructMedium(b *testing.B) {
 	backend := newMockBackend()
-	sampler := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	sampler, err := assay.NewSampler(backend, assay.Config{MaxDepth: 32, MaxPaths: 1000})
+	if err != nil {
+		b.Fatalf("failed to create sampler: %v", err)
+	}
 	defer sampler.Close()
 
 	type Profile struct {
