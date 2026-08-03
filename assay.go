@@ -502,7 +502,8 @@ var ErrMaxSchemasExceeded = errors.New("maximum schema count exceeded")
 
 // parseJSON processes raw JSON bytes and extracts paths.
 func parseJSON(data []byte, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
-	_, err := parseValue(data, 0, stack, depth, maxDepth, maxArrayElements, callback)
+	pos := skipWhitespace(data, 0)
+	_, err := parseValue(data, pos, stack, depth, maxDepth, maxArrayElements, callback)
 	return err
 }
 
@@ -522,7 +523,6 @@ func parseValue(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArra
 	if depth > maxDepth {
 		return pos, ErrMaxDepthExceeded
 	}
-	pos = skipWhitespace(data, pos)
 	if pos >= len(data) {
 		return pos, io.ErrUnexpectedEOF
 	}
@@ -565,9 +565,6 @@ func parseValue(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArra
 }
 
 func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) (int, error) {
-	if depth > maxDepth {
-		return pos, ErrMaxDepthExceeded
-	}
 	pos++ // skip '{'
 
 	for {
@@ -595,6 +592,7 @@ func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArr
 			return pos, fmt.Errorf("expected ':' at pos %d", pos)
 		}
 		pos++ // skip ':'
+		pos = skipWhitespace(data, pos)
 
 		stack.push(key)
 		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, maxArrayElements, callback)
@@ -622,9 +620,6 @@ func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArr
 }
 
 func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) (int, error) {
-	if depth > maxDepth {
-		return pos, ErrMaxDepthExceeded
-	}
 	pos++ // skip '['
 
 	stack.push([]byte("*"))
@@ -886,7 +881,6 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 		Type:        "object",
 		Required:    true,
 		Probability: map[string]float64{"object": 1.0},
-		Children:    make(map[string]*SchemaNode),
 	}
 	nodes[""] = root
 
@@ -925,9 +919,8 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 
 			if _, ok := nodes[currPath]; !ok {
 				node := &SchemaNode{
-					Name:     part,
-					Path:     currPath,
-					Children: make(map[string]*SchemaNode),
+					Name: part,
+					Path: currPath,
 				}
 				nodes[currPath] = node
 
@@ -999,12 +992,6 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 		}
 
 		node.Required = (snap.ObservedCount == parentObserved) && (snap.TypeCounts[TypeNull] == 0)
-	}
-
-	for _, node := range nodes {
-		if len(node.Children) == 0 {
-			node.Children = nil
-		}
 	}
 
 	return root
