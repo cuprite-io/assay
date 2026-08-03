@@ -536,8 +536,156 @@ func TestDottedKeys(t *testing.T) {
 	}
 }
 
+func TestMaxArrayElementsLimit(t *testing.T) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{
+		MaxArrayElements: 3,
+	})
+	defer sampler.Close()
+
+	ctx := context.Background()
+	schemaID := "limit-schema"
+
+	jsonBytes := []byte(`["str1", "str2", "str3", 1, 2, 3]`)
+	err := sampler.Sample(ctx, schemaID, jsonBytes)
+	if err != nil {
+		t.Fatalf("failed to sample: %v", err)
+	}
+
+	node, err := sampler.GetSchema(ctx, schemaID)
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+
+	elementsNode := node.Children["*"]
+	if elementsNode == nil {
+		t.Fatal("expected array elements node '*' to exist")
+	}
+
+	if elementsNode.Type != "string" {
+		t.Errorf("expected type 'string' (since first 3 elements were strings and limit is 3), got %q", elementsNode.Type)
+	}
+	if elementsNode.Probability["string"] != 1.0 {
+		t.Errorf("expected string probability to be 1.0, got %f", elementsNode.Probability["string"])
+	}
+	if elementsNode.Probability["number"] > 0 {
+		t.Errorf("expected number probability to be 0, got %f", elementsNode.Probability["number"])
+	}
+}
+
+func TestMaxArrayElementsLimitReflect(t *testing.T) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{
+		MaxArrayElements: 2,
+	})
+	defer sampler.Close()
+
+	ctx := context.Background()
+	schemaID := "reflect-limit-schema"
+
+	payload := []any{"str1", "str2", 1, 2}
+	err := sampler.Sample(ctx, schemaID, payload)
+	if err != nil {
+		t.Fatalf("failed to sample: %v", err)
+	}
+
+	node, err := sampler.GetSchema(ctx, schemaID)
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+
+	elementsNode := node.Children["*"]
+	if elementsNode == nil {
+		t.Fatal("expected array elements node '*' to exist")
+	}
+
+	if elementsNode.Type != "string" {
+		t.Errorf("expected type 'string', got %q", elementsNode.Type)
+	}
+	if elementsNode.Probability["string"] != 1.0 {
+		t.Errorf("expected string probability to be 1.0, got %f", elementsNode.Probability["string"])
+	}
+}
+
 // Convert struct helper
 func marshal(v any) []byte {
 	b, _ := json.Marshal(v)
 	return b
+}
+
+func TestConfigValidation(t *testing.T) {
+	backend := newMockBackend()
+
+	tests := []struct {
+		name     string
+		input    assay.Config
+		expected assay.Config
+	}{
+		{
+			name: "excessive limits clamped to defaults",
+			input: assay.Config{
+				MaxDepth:         999,
+				MaxPaths:         999_999,
+				MaxArrayElements: 99_999,
+				FlushInterval:    99 * time.Second,
+			},
+			expected: assay.Config{
+				MaxDepth:         32,
+				MaxPaths:         1000,
+				MaxArrayElements: 10,
+				FlushInterval:    100 * time.Millisecond,
+			},
+		},
+		{
+			name: "negative limits clamped to defaults",
+			input: assay.Config{
+				MaxDepth:         -1,
+				MaxPaths:         -100,
+				MaxArrayElements: -5,
+				FlushInterval:    -10 * time.Second,
+			},
+			expected: assay.Config{
+				MaxDepth:         32,
+				MaxPaths:         1000,
+				MaxArrayElements: 10,
+				FlushInterval:    100 * time.Millisecond,
+			},
+		},
+		{
+			name: "valid custom limits preserved",
+			input: assay.Config{
+				MaxDepth:         10,
+				MaxPaths:         2000,
+				MaxArrayElements: 50,
+				FlushInterval:    500 * time.Millisecond,
+			},
+			expected: assay.Config{
+				MaxDepth:         10,
+				MaxPaths:         2000,
+				MaxArrayElements: 50,
+				FlushInterval:    500 * time.Millisecond,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			sampler := assay.NewSampler(backend, tc.input)
+			defer sampler.Close()
+
+			cfg := sampler.Config()
+			if cfg.MaxDepth != tc.expected.MaxDepth {
+				t.Errorf("expected MaxDepth %d, got %d", tc.expected.MaxDepth, cfg.MaxDepth)
+			}
+			if cfg.MaxPaths != tc.expected.MaxPaths {
+				t.Errorf("expected MaxPaths %d, got %d", tc.expected.MaxPaths, cfg.MaxPaths)
+			}
+			if cfg.MaxArrayElements != tc.expected.MaxArrayElements {
+				t.Errorf("expected MaxArrayElements %d, got %d", tc.expected.MaxArrayElements, cfg.MaxArrayElements)
+			}
+			if cfg.FlushInterval != tc.expected.FlushInterval {
+				t.Errorf("expected FlushInterval %v, got %v", tc.expected.FlushInterval, cfg.FlushInterval)
+			}
+		})
+	}
 }

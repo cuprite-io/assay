@@ -80,9 +80,10 @@ type StatsBackend interface {
 
 // Config defines execution and limits for safety.
 type Config struct {
-	MaxDepth      int           // Prevents Stack Overflow (Default: 32)
-	MaxPaths      int           // Prevents Cardinality Explosion (Default: 1000)
-	FlushInterval time.Duration // Interval for buffering writes to stats backend (Default: 100ms)
+	MaxDepth         int           // Prevents Stack Overflow (Default: 32)
+	MaxPaths         int           // Prevents Cardinality Explosion (Default: 1000)
+	MaxArrayElements int           // Max array/slice elements profiled (Default: 10)
+	FlushInterval    time.Duration // Interval for buffering writes to stats backend (Default: 100ms)
 }
 
 // Sampler is the entrypoint coordinator.
@@ -118,13 +119,16 @@ func NewSampler(backend StatsBackend, cfg Config) *Sampler {
 	if backend == nil {
 		panic("assay: backend cannot be nil")
 	}
-	if cfg.MaxDepth <= 0 {
+	if cfg.MaxDepth <= 0 || cfg.MaxDepth > 256 {
 		cfg.MaxDepth = 32
 	}
-	if cfg.MaxPaths <= 0 {
+	if cfg.MaxPaths <= 0 || cfg.MaxPaths > 100_000 {
 		cfg.MaxPaths = 1000
 	}
-	if cfg.FlushInterval <= 0 {
+	if cfg.MaxArrayElements <= 0 || cfg.MaxArrayElements > 10000 {
+		cfg.MaxArrayElements = 10
+	}
+	if cfg.FlushInterval <= 0 || cfg.FlushInterval > 60*time.Second {
 		cfg.FlushInterval = 100 * time.Millisecond
 	}
 
@@ -228,12 +232,12 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 	// 1. Ingest/parse data depending on type
 	switch val := payload.(type) {
 	case []byte:
-		if err := parseJSON(val, stack, 0, s.config.MaxDepth, recordStats); err != nil {
+		if err := parseJSON(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
 			return err
 		}
 	default:
 		// Go value, map, or struct
-		if err := parseGoValue(val, stack, 0, s.config.MaxDepth, recordStats); err != nil {
+		if err := parseGoValue(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
 			return err
 		}
 	}
@@ -472,8 +476,8 @@ func (s *pathStack) current() string {
 var ErrMaxDepthExceeded = errors.New("maximum JSON nesting depth exceeded")
 
 // parseJSON processes raw JSON bytes and extracts paths.
-func parseJSON(data []byte, stack *pathStack, depth, maxDepth int, callback func(path string, dt DataType)) error {
-	_, err := parseValue(data, 0, stack, depth, maxDepth, callback)
+func parseJSON(data []byte, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
+	_, err := parseValue(data, 0, stack, depth, maxDepth, maxArrayElements, callback)
 	return err
 }
 
@@ -489,7 +493,7 @@ func skipWhitespace(data []byte, pos int) int {
 	return pos
 }
 
-func parseValue(data []byte, pos int, stack *pathStack, depth, maxDepth int, callback func(path string, dt DataType)) (int, error) {
+func parseValue(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) (int, error) {
 	if depth > maxDepth {
 		return pos, ErrMaxDepthExceeded
 	}
@@ -500,30 +504,42 @@ func parseValue(data []byte, pos int, stack *pathStack, depth, maxDepth int, cal
 
 	switch data[pos] {
 	case '{':
-		callback(stack.current(), TypeObject)
-		return parseObject(data, pos, stack, depth, maxDepth, callback)
+		if callback != nil {
+			callback(stack.current(), TypeObject)
+		}
+		return parseObject(data, pos, stack, depth, maxDepth, maxArrayElements, callback)
 	case '[':
-		callback(stack.current(), TypeArray)
-		return parseArray(data, pos, stack, depth, maxDepth, callback)
+		if callback != nil {
+			callback(stack.current(), TypeArray)
+		}
+		return parseArray(data, pos, stack, depth, maxDepth, maxArrayElements, callback)
 	case '"':
-		callback(stack.current(), TypeString)
+		if callback != nil {
+			callback(stack.current(), TypeString)
+		}
 		return skipString(data, pos)
 	case 't', 'f':
-		callback(stack.current(), TypeBoolean)
+		if callback != nil {
+			callback(stack.current(), TypeBoolean)
+		}
 		return skipBool(data, pos)
 	case 'n':
-		callback(stack.current(), TypeNull)
+		if callback != nil {
+			callback(stack.current(), TypeNull)
+		}
 		return skipNull(data, pos)
 	default:
 		if (data[pos] >= '0' && data[pos] <= '9') || data[pos] == '-' {
-			callback(stack.current(), TypeNumber)
+			if callback != nil {
+				callback(stack.current(), TypeNumber)
+			}
 			return skipNumber(data, pos)
 		}
 		return pos, fmt.Errorf("invalid json character at pos %d: %q", pos, data[pos])
 	}
 }
 
-func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth int, callback func(path string, dt DataType)) (int, error) {
+func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) (int, error) {
 	if depth > maxDepth {
 		return pos, ErrMaxDepthExceeded
 	}
@@ -556,7 +572,7 @@ func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth int, ca
 		pos++ // skip ':'
 
 		stack.push(key)
-		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, callback)
+		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, maxArrayElements, callback)
 		if err != nil {
 			stack.pop()
 			return nextPos, err
@@ -580,7 +596,7 @@ func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth int, ca
 	}
 }
 
-func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth int, callback func(path string, dt DataType)) (int, error) {
+func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) (int, error) {
 	if depth > maxDepth {
 		return pos, ErrMaxDepthExceeded
 	}
@@ -589,6 +605,7 @@ func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth int, cal
 	stack.push([]byte("*"))
 	defer stack.pop()
 
+	elementCount := 0
 	for {
 		pos = skipWhitespace(data, pos)
 		if pos >= len(data) {
@@ -599,11 +616,17 @@ func parseArray(data []byte, pos int, stack *pathStack, depth, maxDepth int, cal
 			return pos, nil
 		}
 
-		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, callback)
+		cb := callback
+		if elementCount >= maxArrayElements {
+			cb = nil
+		}
+
+		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, maxArrayElements, cb)
 		if err != nil {
 			return nextPos, err
 		}
 		pos = nextPos
+		elementCount++
 
 		pos = skipWhitespace(data, pos)
 		if pos >= len(data) {
@@ -692,11 +715,11 @@ func skipNumber(data []byte, pos int) (int, error) {
 	return pos, nil
 }
 
-func parseGoValue(val any, stack *pathStack, depth, maxDepth int, callback func(path string, dt DataType)) error {
-	return reflectTraverse(reflect.ValueOf(val), stack, depth, maxDepth, callback)
+func parseGoValue(val any, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
+	return reflectTraverse(reflect.ValueOf(val), stack, depth, maxDepth, maxArrayElements, callback)
 }
 
-func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, callback func(path string, dt DataType)) error {
+func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
 	if depth > maxDepth {
 		return ErrMaxDepthExceeded
 	}
@@ -735,7 +758,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 				}
 			}
 			stack.push([]byte(name))
-			if err := reflectTraverse(v.Field(i), stack, depth+1, maxDepth, callback); err != nil {
+			if err := reflectTraverse(v.Field(i), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
 				stack.pop()
 				return err
 			}
@@ -746,7 +769,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 		for _, key := range v.MapKeys() {
 			if key.Kind() == reflect.String {
 				stack.push([]byte(key.String()))
-				if err := reflectTraverse(v.MapIndex(key), stack, depth+1, maxDepth, callback); err != nil {
+				if err := reflectTraverse(v.MapIndex(key), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
 					stack.pop()
 					return err
 				}
@@ -756,8 +779,12 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 	case reflect.Slice, reflect.Array:
 		callback(stack.current(), TypeArray)
 		stack.push([]byte("*"))
-		for i := 0; i < v.Len(); i++ {
-			if err := reflectTraverse(v.Index(i), stack, depth+1, maxDepth, callback); err != nil {
+		limit := v.Len()
+		if limit > maxArrayElements {
+			limit = maxArrayElements
+		}
+		for i := 0; i < limit; i++ {
+			if err := reflectTraverse(v.Index(i), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
 				stack.pop()
 				return err
 			}
@@ -775,7 +802,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth int, cal
 		if v.IsNil() {
 			callback(stack.current(), TypeNull)
 		} else {
-			if err := reflectTraverse(v.Elem(), stack, depth+1, maxDepth, callback); err != nil {
+			if err := reflectTraverse(v.Elem(), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
 				return err
 			}
 		}
