@@ -626,12 +626,14 @@ func TestConfigValidation(t *testing.T) {
 			input: assay.Config{
 				MaxDepth:         999,
 				MaxPaths:         999_999,
+				MaxSchemas:       999_999,
 				MaxArrayElements: 99_999,
 				FlushInterval:    99 * time.Second,
 			},
 			expected: assay.Config{
 				MaxDepth:         32,
 				MaxPaths:         1000,
+				MaxSchemas:       1000,
 				MaxArrayElements: 10,
 				FlushInterval:    100 * time.Millisecond,
 			},
@@ -641,12 +643,14 @@ func TestConfigValidation(t *testing.T) {
 			input: assay.Config{
 				MaxDepth:         -1,
 				MaxPaths:         -100,
+				MaxSchemas:       -10,
 				MaxArrayElements: -5,
 				FlushInterval:    -10 * time.Second,
 			},
 			expected: assay.Config{
 				MaxDepth:         32,
 				MaxPaths:         1000,
+				MaxSchemas:       1000,
 				MaxArrayElements: 10,
 				FlushInterval:    100 * time.Millisecond,
 			},
@@ -656,12 +660,14 @@ func TestConfigValidation(t *testing.T) {
 			input: assay.Config{
 				MaxDepth:         10,
 				MaxPaths:         2000,
+				MaxSchemas:       500,
 				MaxArrayElements: 50,
 				FlushInterval:    500 * time.Millisecond,
 			},
 			expected: assay.Config{
 				MaxDepth:         10,
 				MaxPaths:         2000,
+				MaxSchemas:       500,
 				MaxArrayElements: 50,
 				FlushInterval:    500 * time.Millisecond,
 			},
@@ -680,6 +686,9 @@ func TestConfigValidation(t *testing.T) {
 			if cfg.MaxPaths != tc.expected.MaxPaths {
 				t.Errorf("expected MaxPaths %d, got %d", tc.expected.MaxPaths, cfg.MaxPaths)
 			}
+			if cfg.MaxSchemas != tc.expected.MaxSchemas {
+				t.Errorf("expected MaxSchemas %d, got %d", tc.expected.MaxSchemas, cfg.MaxSchemas)
+			}
 			if cfg.MaxArrayElements != tc.expected.MaxArrayElements {
 				t.Errorf("expected MaxArrayElements %d, got %d", tc.expected.MaxArrayElements, cfg.MaxArrayElements)
 			}
@@ -687,5 +696,53 @@ func TestConfigValidation(t *testing.T) {
 				t.Errorf("expected FlushInterval %v, got %v", tc.expected.FlushInterval, cfg.FlushInterval)
 			}
 		})
+	}
+}
+
+func TestMaxSchemasLimit(t *testing.T) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{
+		MaxSchemas: 3,
+	})
+	defer sampler.Close()
+
+	ctx := context.Background()
+
+	// 1. Ingest up to the limit
+	if err := sampler.Sample(ctx, "schema-1", []byte(`{"id": 1}`)); err != nil {
+		t.Fatalf("unexpected error sampling schema-1: %v", err)
+	}
+	if err := sampler.Sample(ctx, "schema-2", []byte(`{"id": 2}`)); err != nil {
+		t.Fatalf("unexpected error sampling schema-2: %v", err)
+	}
+	if err := sampler.Sample(ctx, "schema-3", []byte(`{"id": 3}`)); err != nil {
+		t.Fatalf("unexpected error sampling schema-3: %v", err)
+	}
+
+	// 2. The fourth unique schema ID should fail with ErrMaxSchemasExceeded
+	err := sampler.Sample(ctx, "schema-4", []byte(`{"id": 4}`))
+	if err != assay.ErrMaxSchemasExceeded {
+		t.Errorf("expected ErrMaxSchemasExceeded, got %v", err)
+	}
+
+	// 3. Re-sampling an existing schema ID (within limit) should succeed
+	if err := sampler.Sample(ctx, "schema-2", []byte(`{"id": 22}`)); err != nil {
+		t.Fatalf("unexpected error re-sampling schema-2: %v", err)
+	}
+
+	// 4. Delete an existing schema
+	if err := sampler.DeleteSchema(ctx, "schema-1"); err != nil {
+		t.Fatalf("unexpected error deleting schema-1: %v", err)
+	}
+
+	// 5. Sampling a new schema ID now should succeed since count decremented
+	if err := sampler.Sample(ctx, "schema-5", []byte(`{"id": 5}`)); err != nil {
+		t.Fatalf("unexpected error sampling schema-5: %v", err)
+	}
+
+	// 6. And the fifth unique schema ID should fail now if we try another one
+	err = sampler.Sample(ctx, "schema-6", []byte(`{"id": 6}`))
+	if err != assay.ErrMaxSchemasExceeded {
+		t.Errorf("expected ErrMaxSchemasExceeded, got %v", err)
 	}
 }

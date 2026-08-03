@@ -82,6 +82,7 @@ type StatsBackend interface {
 type Config struct {
 	MaxDepth         int           // Prevents Stack Overflow (Default: 32)
 	MaxPaths         int           // Prevents Cardinality Explosion (Default: 1000)
+	MaxSchemas       int           // Prevents unbounded schema creation (Default: 1000)
 	MaxArrayElements int           // Max array/slice elements profiled (Default: 10)
 	FlushInterval    time.Duration // Interval for buffering writes to stats backend (Default: 100ms)
 }
@@ -96,6 +97,8 @@ type Sampler struct {
 
 	quit chan struct{}
 	wg   sync.WaitGroup
+
+	activeSchemas int64
 }
 
 type schemaShard struct {
@@ -124,6 +127,9 @@ func NewSampler(backend StatsBackend, cfg Config) *Sampler {
 	}
 	if cfg.MaxPaths <= 0 || cfg.MaxPaths > 100_000 {
 		cfg.MaxPaths = 1000
+	}
+	if cfg.MaxSchemas <= 0 || cfg.MaxSchemas > 100_000 {
+		cfg.MaxSchemas = 1000
 	}
 	if cfg.MaxArrayElements <= 0 || cfg.MaxArrayElements > 10000 {
 		cfg.MaxArrayElements = 10
@@ -185,7 +191,10 @@ func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
 	h := fnvHash(schemaID) % numShards
 	shard := s.shards[h]
 	shard.mu.Lock()
-	delete(shard.schemas, schemaID)
+	if _, exists := shard.schemas[schemaID]; exists {
+		delete(shard.schemas, schemaID)
+		atomic.AddInt64(&s.activeSchemas, -1)
+	}
 	shard.mu.Unlock()
 
 	return s.backend.Delete(ctx, schemaID)
@@ -203,6 +212,9 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 	defer s.pool.Put(stack)
 
 	sa := s.getSchemaAccumulator(schemaID, true)
+	if sa == nil {
+		return ErrMaxSchemasExceeded
+	}
 
 	// Callback to increment local path statistics
 	recordStats := func(path string, dt DataType) {
@@ -352,10 +364,15 @@ func (s *Sampler) getSchemaAccumulator(schemaID string, createIfMissing bool) *s
 		shard.mu.Lock()
 		sa, ok = shard.schemas[schemaID]
 		if !ok {
+			if atomic.LoadInt64(&s.activeSchemas) >= int64(s.config.MaxSchemas) {
+				shard.mu.Unlock()
+				return nil
+			}
 			sa = &schemaAccumulator{
 				stats: make(map[string]*pathStats),
 			}
 			shard.schemas[schemaID] = sa
+			atomic.AddInt64(&s.activeSchemas, 1)
 		}
 		shard.mu.Unlock()
 	}
@@ -474,6 +491,9 @@ func (s *pathStack) current() string {
 
 // ErrMaxDepthExceeded is returned when the payload exceeds the maximum depth limit.
 var ErrMaxDepthExceeded = errors.New("maximum JSON nesting depth exceeded")
+
+// ErrMaxSchemasExceeded is returned when the maximum number of active schemas is reached.
+var ErrMaxSchemasExceeded = errors.New("maximum schema count exceeded")
 
 // parseJSON processes raw JSON bytes and extracts paths.
 func parseJSON(data []byte, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
