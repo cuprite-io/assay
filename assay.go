@@ -15,6 +15,9 @@ import (
 	"time"
 )
 
+// Version is the current version of the assay library.
+const Version = "0.4.3"
+
 // DataType represents the primitive JSON types.
 type DataType int
 
