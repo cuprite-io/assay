@@ -859,3 +859,74 @@ func TestCloseGuardAndOnError(t *testing.T) {
 		t.Error("expected OnError callback to have been invoked on flush failure, got nil")
 	}
 }
+
+func TestParserCorrectnessGroupB(t *testing.T) {
+	backend := newMockBackend()
+	sampler := mustNewSampler(t, backend, assay.Config{})
+	defer sampler.Close()
+
+	ctx := context.Background()
+
+	// 1. Test malformed numbers
+	malformedNumbers := []string{
+		`{"num": --5}`,
+		`{"num": 3.2.1}`,
+		`{"num": 5-}`,
+		`{"num": 1e}`,
+		`{"num": e10}`,
+		`{"num": 1.}`,
+	}
+	for _, payload := range malformedNumbers {
+		err := sampler.Sample(ctx, "test-malformed-num", []byte(payload))
+		if err == nil {
+			t.Errorf("expected parsing error for malformed number %q, got nil", payload)
+		}
+	}
+
+	// 2. Test backslash escaping round-trip
+	// For JSON input, raw key is read as "a\\b"
+	err := sampler.Sample(ctx, "test-backslash-json", []byte(`{"a\\b": 123}`))
+	if err != nil {
+		t.Fatalf("failed to sample JSON payload with backslashes: %v", err)
+	}
+	schemaJSON, err := sampler.GetSchema(ctx, "test-backslash-json")
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+	if _, ok := schemaJSON.Children[`a\\b`]; !ok {
+		t.Errorf("expected child key 'a\\\\b' in schema children, got %v", schemaJSON.Children)
+	}
+
+	// For Go map input, key has a single literal backslash: "a\b"
+	err = sampler.Sample(ctx, "test-backslash-map", map[string]any{"a\b": 123})
+	if err != nil {
+		t.Fatalf("failed to sample map payload with backslashes: %v", err)
+	}
+	schemaMap, err := sampler.GetSchema(ctx, "test-backslash-map")
+	if err != nil {
+		t.Fatalf("failed to get schema: %v", err)
+	}
+	if _, ok := schemaMap.Children["a\b"]; !ok {
+		t.Errorf("expected child key 'a\\b' in schema children, got %v", schemaMap.Children)
+	}
+
+	// 3. Test truncated escape sequences
+	truncatedString := `{"key": "abc\`
+	err = sampler.Sample(ctx, "test-truncated-escape", []byte(truncatedString))
+	if err == nil {
+		t.Errorf("expected parsing error for truncated escape sequence, got nil")
+	}
+
+	// 4. Test string payload parsed as JSON
+	err = sampler.Sample(ctx, "test-string-json", `{"key": "val"}`)
+	if err != nil {
+		t.Fatalf("failed to sample string JSON payload: %v", err)
+	}
+	schemaStr, err := sampler.GetSchema(ctx, "test-string-json")
+	if err != nil {
+		t.Fatalf("failed to get schema for string JSON: %v", err)
+	}
+	if node, ok := schemaStr.Children["key"]; !ok || node.Type != "string" {
+		t.Errorf("expected key 'key' with type 'string', got %+v", node)
+	}
+}

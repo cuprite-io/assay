@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.5.0"
+const Version = "0.5.1"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -293,6 +293,10 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 		if err := parseJSON(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
 			return err
 		}
+	case string:
+		if err := parseJSON([]byte(val), stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
+			return err
+		}
 	default:
 		// Go value, map, or struct
 		if err := parseGoValue(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
@@ -528,9 +532,12 @@ func (s *pathStack) push(key []byte) {
 		s.buf = append(s.buf, '.')
 	}
 	for _, b := range key {
-		if b == '.' {
+		switch b {
+		case '.':
 			s.buf = append(s.buf, '\\', '.')
-		} else {
+		case '\\':
+			s.buf = append(s.buf, '\\', '\\')
+		default:
 			s.buf = append(s.buf, b)
 		}
 	}
@@ -623,6 +630,12 @@ func parseValue(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArra
 	}
 }
 
+func parseObjectField(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, key []byte, callback func(path string, dt DataType)) (int, error) {
+	stack.push(key)
+	defer stack.pop()
+	return parseValue(data, pos, stack, depth+1, maxDepth, maxArrayElements, callback)
+}
+
 func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) (int, error) {
 	pos++ // skip '{'
 
@@ -653,14 +666,11 @@ func parseObject(data []byte, pos int, stack *pathStack, depth, maxDepth, maxArr
 		pos++ // skip ':'
 		pos = skipWhitespace(data, pos)
 
-		stack.push(key)
-		nextPos, err := parseValue(data, pos, stack, depth+1, maxDepth, maxArrayElements, callback)
+		nextPos, err := parseObjectField(data, pos, stack, depth, maxDepth, maxArrayElements, key, callback)
 		if err != nil {
-			stack.pop()
 			return nextPos, err
 		}
 		pos = nextPos
-		stack.pop()
 
 		pos = skipWhitespace(data, pos)
 		if pos >= len(data) {
@@ -731,12 +741,15 @@ func readString(data []byte, pos int) (int, []byte, error) {
 			return pos + 1, data[start:pos], nil
 		}
 		if data[pos] == '\\' {
+			if pos+1 >= len(data) {
+				return len(data), nil, io.ErrUnexpectedEOF
+			}
 			pos += 2
 		} else {
 			pos++
 		}
 	}
-	return pos, nil, io.ErrUnexpectedEOF
+	return len(data), nil, io.ErrUnexpectedEOF
 }
 
 func skipString(data []byte, pos int) (int, error) {
@@ -746,12 +759,15 @@ func skipString(data []byte, pos int) (int, error) {
 			return pos + 1, nil
 		}
 		if data[pos] == '\\' {
+			if pos+1 >= len(data) {
+				return len(data), io.ErrUnexpectedEOF
+			}
 			pos += 2
 		} else {
 			pos++
 		}
 	}
-	return pos, io.ErrUnexpectedEOF
+	return len(data), io.ErrUnexpectedEOF
 }
 
 func skipBool(data []byte, pos int) (int, error) {
@@ -777,20 +793,58 @@ func skipNull(data []byte, pos int) (int, error) {
 
 func skipNumber(data []byte, pos int) (int, error) {
 	start := pos
-	for pos < len(data) {
-		c := data[pos]
-		if (c >= '0' && c <= '9') || c == '.' || c == '-' || c == 'e' || c == 'E' {
+	if pos >= len(data) {
+		return pos, io.ErrUnexpectedEOF
+	}
+
+	// 1. Optional minus sign
+	if data[pos] == '-' {
+		pos++
+	}
+
+	if pos >= len(data) {
+		return pos, io.ErrUnexpectedEOF
+	}
+
+	// 2. Integer part
+	if data[pos] == '0' {
+		pos++
+	} else if data[pos] >= '1' && data[pos] <= '9' {
+		pos++
+		for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
 			pos++
-		} else if c == '+' {
-			if pos > start && (data[pos-1] == 'e' || data[pos-1] == 'E') {
-				pos++
-			} else {
-				break
-			}
-		} else {
-			break
+		}
+	} else {
+		return pos, fmt.Errorf("invalid json number starting at %d", start)
+	}
+
+	// 3. Fraction part
+	if pos < len(data) && data[pos] == '.' {
+		pos++
+		if pos >= len(data) || data[pos] < '0' || data[pos] > '9' {
+			return pos, fmt.Errorf("invalid json number fraction at %d", pos)
+		}
+		pos++
+		for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
+			pos++
 		}
 	}
+
+	// 4. Exponent part
+	if pos < len(data) && (data[pos] == 'e' || data[pos] == 'E') {
+		pos++
+		if pos < len(data) && (data[pos] == '+' || data[pos] == '-') {
+			pos++
+		}
+		if pos >= len(data) || data[pos] < '0' || data[pos] > '9' {
+			return pos, fmt.Errorf("invalid json number exponent at %d", pos)
+		}
+		pos++
+		for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
+			pos++
+		}
+	}
+
 	return pos, nil
 }
 
@@ -957,9 +1011,12 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 		for _, part := range parts {
 			var escapedPart strings.Builder
 			for i := 0; i < len(part); i++ {
-				if part[i] == '.' {
+				switch part[i] {
+				case '.':
 					escapedPart.WriteString(`\.`)
-				} else {
+				case '\\':
+					escapedPart.WriteString(`\\`)
+				default:
 					escapedPart.WriteByte(part[i])
 				}
 			}
