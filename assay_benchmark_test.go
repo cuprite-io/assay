@@ -2,6 +2,7 @@ package assay_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/cuprite-io/assay"
@@ -111,5 +112,26 @@ func BenchmarkSampleGoStructMedium(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_ = sampler.Sample(ctx, "bench-struct", u)
+	}
+}
+
+func BenchmarkGetSchemaMedium(b *testing.B) {
+	backend := newMockBackend()
+	ctx := context.Background()
+	schemaID := "bench-get-schema"
+	for i := 0; i < 20; i++ {
+		field := fmt.Sprintf("field_%d:string", i)
+		_, _ = backend.MapIncrementBy(ctx, schemaID, field, 1.0)
+	}
+
+	sampler, err := assay.NewSampler(backend, assay.Config{})
+	if err != nil {
+		b.Fatalf("failed to create sampler: %v", err)
+	}
+	defer sampler.Close()
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = sampler.GetSchema(ctx, schemaID)
 	}
 }

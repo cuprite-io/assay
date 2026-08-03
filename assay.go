@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.5.2"
+const Version = "0.6.0"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -45,11 +45,13 @@ func (d DataType) String() string {
 	case TypeArray:
 		return "array"
 	default:
-		return "unknown"
+		return fmt.Sprintf("DataType(%d)", d)
 	}
 }
 
 // SchemaNode represents a reconstructed node in the schema tree.
+// Note: This structure is not safe for concurrent mutation. If multiple
+// goroutines write to the returned tree, external synchronization is required.
 type SchemaNode struct {
 	Name        string                 `json:"name"`
 	Path        string                 `json:"path"`
@@ -108,6 +110,11 @@ type Sampler struct {
 	cancel       context.CancelFunc
 	mu           sync.Mutex
 	lastFlushErr error
+
+	ingestedSamples uint64
+	droppedSamples  uint64
+	flushSuccesses  uint64
+	flushFailures   uint64
 }
 
 type schemaShard struct {
@@ -228,6 +235,26 @@ func (s *Sampler) Flush() error {
 	return s.flushAll()
 }
 
+// SamplerStats contains metrics and observability data for the Sampler.
+type SamplerStats struct {
+	ActiveSchemas   int64
+	IngestedSamples uint64
+	DroppedSamples  uint64
+	FlushSuccesses  uint64
+	FlushFailures   uint64
+}
+
+// Stats returns a snapshot of the Sampler's metrics.
+func (s *Sampler) Stats() SamplerStats {
+	return SamplerStats{
+		ActiveSchemas:   atomic.LoadInt64(&s.activeSchemas),
+		IngestedSamples: atomic.LoadUint64(&s.ingestedSamples),
+		DroppedSamples:  atomic.LoadUint64(&s.droppedSamples),
+		FlushSuccesses:  atomic.LoadUint64(&s.flushSuccesses),
+		FlushFailures:   atomic.LoadUint64(&s.flushFailures),
+	}
+}
+
 // DeleteSchema removes a schema ID and all its accumulated stats from local memory
 // and deletes the schema's metrics from the persistent stats backend.
 func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
@@ -246,6 +273,7 @@ func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
 // Sample parses the incoming payload and updates stats in the local buffer.
 // payload can be: []byte (JSON), map[string]any, or a Struct pointer.
 func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) error {
+	atomic.AddUint64(&s.ingestedSamples, 1)
 	if s.closed.Load() {
 		return ErrClosed
 	}
@@ -275,6 +303,7 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 			if !ok {
 				// Enforce cardinality limits to prevent OOM
 				if len(sa.stats) >= s.config.MaxPaths {
+					atomic.AddUint64(&s.droppedSamples, 1)
 					sa.mu.Unlock()
 					return
 				}
@@ -291,15 +320,18 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 	switch val := payload.(type) {
 	case []byte:
 		if err := parseJSON(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
+			atomic.AddUint64(&s.droppedSamples, 1)
 			return err
 		}
 	case string:
 		if err := parseJSON([]byte(val), stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
+			atomic.AddUint64(&s.droppedSamples, 1)
 			return err
 		}
 	default:
 		// Go value, map, or struct
 		if err := parseGoValue(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
+			atomic.AddUint64(&s.droppedSamples, 1)
 			return err
 		}
 	}
@@ -420,6 +452,7 @@ func (s *Sampler) getSchemaAccumulator(schemaID string, createIfMissing bool) *s
 			for {
 				currentActive := atomic.LoadInt64(&s.activeSchemas)
 				if currentActive >= int64(s.config.MaxSchemas) {
+					atomic.AddUint64(&s.droppedSamples, 1)
 					shard.mu.Unlock()
 					return nil
 				}
@@ -514,11 +547,14 @@ func (s *Sampler) flushAll() error {
 			for _, u := range updates {
 				_, err := s.backend.MapIncrementBy(ctx, schemaID, u.field, float64(u.count))
 				if err != nil {
+					atomic.AddUint64(&s.flushFailures, 1)
 					flushErr := fmt.Errorf("failed to flush stats for schema %q field %q: %w", schemaID, u.field, err)
 					errs = append(errs, flushErr)
 					if s.config.OnError != nil {
 						s.config.OnError(flushErr)
 					}
+				} else {
+					atomic.AddUint64(&s.flushSuccesses, 1)
 				}
 			}
 		}

@@ -951,3 +951,43 @@ func TestParserCorrectnessGroupC(t *testing.T) {
 		t.Errorf("expected no error for interface wrapped value, got %v", err)
 	}
 }
+
+func TestParserCorrectnessGroupD(t *testing.T) {
+	backend := newMockBackend()
+	sampler := mustNewSampler(t, backend, assay.Config{
+		MaxDepth:      2,
+		MaxPaths:      2,
+		FlushInterval: 10 * time.Millisecond,
+	})
+	defer sampler.Close()
+
+	ctx := context.Background()
+
+	// 1. Ingestion count
+	_ = sampler.Sample(ctx, "test-stats", []byte(`{"a": 1}`))
+	_ = sampler.Sample(ctx, "test-stats", []byte(`{"b": 2}`))
+
+	stats := sampler.Stats()
+	if stats.IngestedSamples != 2 {
+		t.Errorf("expected IngestedSamples 2, got %d", stats.IngestedSamples)
+	}
+
+	// 2. Dropped samples count:
+	// a. MaxDepth exceeded:
+	_ = sampler.Sample(ctx, "test-stats", []byte(`{"a": {"b": {"c": 3}}}`)) // Depth = 3 > MaxDepth = 2
+
+	// b. MaxPaths exceeded:
+	// "a" and "b" are 2 paths (the limit). Pushing a 3rd path "c" should drop it.
+	_ = sampler.Sample(ctx, "test-stats", []byte(`{"c": 3}`))
+
+	stats = sampler.Stats()
+	if stats.DroppedSamples == 0 {
+		t.Error("expected DroppedSamples > 0, got 0")
+	}
+
+	// 3. DataType String fallback formatting
+	invalidType := assay.DataType(99)
+	if str := invalidType.String(); str != "DataType(99)" {
+		t.Errorf("expected 'DataType(99)', got %q", str)
+	}
+}
