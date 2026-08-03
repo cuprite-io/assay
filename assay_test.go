@@ -3,6 +3,7 @@ package assay_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strconv"
 	"sync"
 	"testing"
@@ -743,4 +744,52 @@ func TestMaxSchemasLimit(t *testing.T) {
 	if err != assay.ErrMaxSchemasExceeded {
 		t.Errorf("expected ErrMaxSchemasExceeded, got %v", err)
 	}
+}
+
+func TestConcurrentOperations(t *testing.T) {
+	backend := newMockBackend()
+	sampler := assay.NewSampler(backend, assay.Config{
+		MaxDepth:      10,
+		MaxPaths:      1000,
+		MaxSchemas:    100,
+		FlushInterval: 10 * time.Millisecond,
+	})
+	defer sampler.Close()
+
+	ctx := context.Background()
+
+	const numWorkers = 8
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	// Concurrently call Sample, GetSchema, DeleteSchema, and Flush
+	for i := 0; i < numWorkers; i++ {
+		go func(workerID int) {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				schemaID := fmt.Sprintf("schema-%d", (workerID+j)%5)
+				payload := []byte(fmt.Sprintf(`{"worker": %d, "iteration": %d, "nested": {"val": true}}`, workerID, j))
+
+				// 1. Sample
+				_ = sampler.Sample(ctx, schemaID, payload)
+
+				// 2. GetSchema
+				_, _ = sampler.GetSchema(ctx, schemaID)
+
+				// 3. Flush (forces interaction with the flusher)
+				if j%10 == 0 {
+					sampler.Flush()
+				}
+
+				// 4. Delete Schema (tests schema deletion concurrency)
+				if j%25 == 0 {
+					_ = sampler.DeleteSchema(ctx, schemaID)
+				}
+			}
+		}(i)
+	}
+
+	wg.Wait()
 }
