@@ -3,8 +3,10 @@ package assay_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -875,6 +877,9 @@ func TestParserCorrectnessGroupB(t *testing.T) {
 		`{"num": 1e}`,
 		`{"num": e10}`,
 		`{"num": 1.}`,
+		`{"num": 01}`,
+		`{"num": 00}`,
+		`{"num": -05}`,
 	}
 	for _, payload := range malformedNumbers {
 		err := sampler.Sample(ctx, "test-malformed-num", []byte(payload))
@@ -897,8 +902,8 @@ func TestParserCorrectnessGroupB(t *testing.T) {
 		t.Errorf("expected child key 'a\\\\b' in schema children, got %v", schemaJSON.Children)
 	}
 
-	// For Go map input, key has a single literal backslash: "a\b"
-	err = sampler.Sample(ctx, "test-backslash-map", map[string]any{"a\b": 123})
+	// For Go map input, key has a single literal backslash: `a\b`
+	err = sampler.Sample(ctx, "test-backslash-map", map[string]any{`a\b`: 123})
 	if err != nil {
 		t.Fatalf("failed to sample map payload with backslashes: %v", err)
 	}
@@ -906,7 +911,7 @@ func TestParserCorrectnessGroupB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to get schema: %v", err)
 	}
-	if _, ok := schemaMap.Children["a\b"]; !ok {
+	if _, ok := schemaMap.Children[`a\b`]; !ok {
 		t.Errorf("expected child key 'a\\b' in schema children, got %v", schemaMap.Children)
 	}
 
@@ -989,5 +994,43 @@ func TestParserCorrectnessGroupD(t *testing.T) {
 	invalidType := assay.DataType(99)
 	if str := invalidType.String(); str != "DataType(99)" {
 		t.Errorf("expected 'DataType(99)', got %q", str)
+	}
+}
+
+type mockErrorBackend struct {
+	err error
+}
+
+func (m *mockErrorBackend) MapIncrementBy(ctx context.Context, key, field string, delta float64) (float64, error) {
+	return 0, m.err
+}
+
+func (m *mockErrorBackend) MapGetAll(ctx context.Context, key string) (map[string]string, error) {
+	return nil, m.err
+}
+
+func (m *mockErrorBackend) Delete(ctx context.Context, key string) error {
+	return m.err
+}
+
+func TestFlushErrorPropagation(t *testing.T) {
+	errBackend := &mockErrorBackend{err: errors.New("backend write failed")}
+	sampler, err := assay.NewSampler(errBackend, assay.Config{})
+	if err != nil {
+		t.Fatalf("failed to create sampler: %v", err)
+	}
+	defer sampler.Close()
+
+	ctx := context.Background()
+	err = sampler.Sample(ctx, "test-schema", []byte(`{"field": "val"}`))
+	if err != nil {
+		t.Fatalf("failed to sample: %v", err)
+	}
+
+	err = sampler.Flush()
+	if err == nil {
+		t.Error("expected error from Flush(), got nil")
+	} else if !strings.Contains(err.Error(), "backend write failed") {
+		t.Errorf("expected error to contain 'backend write failed', got: %v", err)
 	}
 }

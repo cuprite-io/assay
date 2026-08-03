@@ -57,7 +57,10 @@ func main() {
 		FlushInterval: 100 * time.Millisecond, // Accumulation window for local writes
 	}
 
-	sampler := assay.NewSampler(backend, cfg)
+	sampler, err := assay.NewSampler(backend, cfg)
+	if err != nil {
+		panic(err)
+	}
 	defer sampler.Close()
 
 	ctx := context.Background()
@@ -109,7 +112,11 @@ func main() {
 	capClient, _ := capacitor.New(...)
 
 	// Pass capClient directly as the backend!
-	sampler := assay.NewSampler(capClient, assay.Config{})
+	sampler, err := assay.NewSampler(capClient, assay.Config{})
+	if err != nil {
+		panic(err)
+	}
+	defer sampler.Close()
 	
 	// ...
 }

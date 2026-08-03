@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.6.0"
+const Version = "0.6.1"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -857,6 +857,9 @@ func skipNumber(data []byte, pos int) (int, error) {
 	// 2. Integer part
 	if data[pos] == '0' {
 		pos++
+		if pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
+			return pos, fmt.Errorf("invalid json number with leading zero starting at %d", start)
+		}
 	} else if data[pos] >= '1' && data[pos] <= '9' {
 		pos++
 		for pos < len(data) && data[pos] >= '0' && data[pos] <= '9' {
