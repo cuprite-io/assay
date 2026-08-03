@@ -185,6 +185,11 @@ func (s *Sampler) Close() error {
 	}
 }
 
+// Flush forces an immediate synchronous flush of all locally accumulated statistics to the backend.
+func (s *Sampler) Flush() {
+	s.flushAll()
+}
+
 // DeleteSchema removes a schema ID and all its accumulated stats from local memory
 // and deletes the schema's metrics from the persistent stats backend.
 func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {

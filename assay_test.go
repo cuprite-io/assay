@@ -358,10 +358,8 @@ func TestLocalAggregationAndFlush(t *testing.T) {
 		}
 	}
 
-	// Initially, let's look at mockBackend. FetchStats directly from mockBackend.
-	// Since the background flusher has not completed (or runs every 50ms),
-	// wait a bit for flush.
-	time.Sleep(100 * time.Millisecond)
+	// Trigger a synchronous flush instead of sleeping
+	sampler.Flush()
 
 	backend.mu.Lock()
 	fields, ok := backend.stats[schemaID]
