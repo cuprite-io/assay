@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.5.1"
+const Version = "0.5.2"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -417,15 +417,20 @@ func (s *Sampler) getSchemaAccumulator(schemaID string, createIfMissing bool) *s
 		shard.mu.Lock()
 		sa, ok = shard.schemas[schemaID]
 		if !ok {
-			if atomic.LoadInt64(&s.activeSchemas) >= int64(s.config.MaxSchemas) {
-				shard.mu.Unlock()
-				return nil
+			for {
+				currentActive := atomic.LoadInt64(&s.activeSchemas)
+				if currentActive >= int64(s.config.MaxSchemas) {
+					shard.mu.Unlock()
+					return nil
+				}
+				if atomic.CompareAndSwapInt64(&s.activeSchemas, currentActive, currentActive+1) {
+					break
+				}
 			}
 			sa = &schemaAccumulator{
 				stats: make(map[string]*pathStats),
 			}
 			shard.schemas[schemaID] = sa
-			atomic.AddInt64(&s.activeSchemas, 1)
 		}
 		shard.mu.Unlock()
 	}
@@ -478,6 +483,13 @@ func (s *Sampler) flushAll() error {
 		shard.mu.RUnlock()
 
 		for schemaID, sa := range schemas {
+			shard.mu.RLock()
+			_, exists := shard.schemas[schemaID]
+			shard.mu.RUnlock()
+			if !exists {
+				continue
+			}
+
 			sa.mu.RLock()
 			statsRefs := make([]pathStatsRef, 0, len(sa.stats))
 			for path, stats := range sa.stats {
@@ -935,7 +947,7 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth, maxArra
 		if v.IsNil() {
 			callback(stack.current(), TypeNull)
 		} else {
-			if err := reflectTraverse(v.Elem(), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
+			if err := reflectTraverse(v.Elem(), stack, depth, maxDepth, maxArrayElements, callback); err != nil {
 				return err
 			}
 		}

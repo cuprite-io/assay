@@ -930,3 +930,24 @@ func TestParserCorrectnessGroupB(t *testing.T) {
 		t.Errorf("expected key 'key' with type 'string', got %+v", node)
 	}
 }
+
+func TestParserCorrectnessGroupC(t *testing.T) {
+	backend := newMockBackend()
+	// Set MaxDepth to 2
+	sampler := mustNewSampler(t, backend, assay.Config{MaxDepth: 2})
+	defer sampler.Close()
+
+	ctx := context.Background()
+
+	// 1. Interface depth test
+	// Wrapping a struct in multiple layers of interface{} should not exceed MaxDepth = 2
+	type Inner struct {
+		Key string `json:"key"`
+	}
+	var wrapped any = any(Inner{Key: "value"})
+
+	err := sampler.Sample(ctx, "test-interface-depth", wrapped)
+	if err != nil {
+		t.Errorf("expected no error for interface wrapped value, got %v", err)
+	}
+}
