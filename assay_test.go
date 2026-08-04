@@ -977,17 +977,23 @@ func TestParserCorrectnessGroupD(t *testing.T) {
 		t.Errorf("expected IngestedSamples 2, got %d", stats.IngestedSamples)
 	}
 
-	// 2. Dropped samples count:
-	// a. MaxDepth exceeded:
+	// 2. Dropped and Rejected samples count:
+	// a. MaxDepth exceeded (Rejected):
 	_ = sampler.Sample(ctx, "test-stats", []byte(`{"a": {"b": {"c": 3}}}`)) // Depth = 3 > MaxDepth = 2
 
-	// b. MaxPaths exceeded:
+	// b. MaxPaths exceeded (Dropped):
 	// "a" and "b" are 2 paths (the limit). Pushing a 3rd path "c" should drop it.
 	_ = sampler.Sample(ctx, "test-stats", []byte(`{"c": 3}`))
 
 	stats = sampler.Stats()
-	if stats.DroppedSamples == 0 {
-		t.Error("expected DroppedSamples > 0, got 0")
+	if stats.IngestedSamples != 3 {
+		t.Errorf("expected IngestedSamples to be 3, got %d", stats.IngestedSamples)
+	}
+	if stats.RejectedSamples != 1 {
+		t.Errorf("expected RejectedSamples 1, got %d", stats.RejectedSamples)
+	}
+	if stats.DroppedSamples != 3 {
+		t.Errorf("expected DroppedSamples 3, got %d", stats.DroppedSamples)
 	}
 
 	// 3. DataType String fallback formatting

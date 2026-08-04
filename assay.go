@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.6.1"
+const Version = "0.6.2"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -89,10 +89,12 @@ type Config struct {
 	MaxSchemas       int           // Prevents unbounded schema creation (Default: 1000)
 	MaxArrayElements int           // Max array/slice elements profiled (Default: 10)
 	FlushInterval    time.Duration // Interval for buffering writes to stats backend (Default: 100ms)
+	FlushTimeout     time.Duration // Timeout for individual backend writes (Default: 3s)
 	OnError          func(error)   // Optional callback to handle flush or background errors
 }
 
 // Sampler is the entrypoint coordinator.
+// Sampler must not be copied after creation.
 type Sampler struct {
 	backend StatsBackend
 	config  Config
@@ -100,19 +102,18 @@ type Sampler struct {
 	shards []*schemaShard
 	pool   sync.Pool
 
-	quit chan struct{}
-	wg   sync.WaitGroup
+	wg sync.WaitGroup
 
 	activeSchemas int64
 
 	closed       atomic.Bool
 	ctx          context.Context
 	cancel       context.CancelFunc
-	mu           sync.Mutex
-	lastFlushErr error
+	lastFlushErr atomic.Value
 
 	ingestedSamples uint64
 	droppedSamples  uint64
+	rejectedSamples uint64
 	flushSuccesses  uint64
 	flushFailures   uint64
 }
@@ -153,6 +154,9 @@ func NewSampler(backend StatsBackend, cfg Config) (*Sampler, error) {
 	if cfg.FlushInterval < 0 || cfg.FlushInterval > 60*time.Second {
 		return nil, fmt.Errorf("assay: invalid FlushInterval %v (must be between 0 and 60 seconds)", cfg.FlushInterval)
 	}
+	if cfg.FlushTimeout < 0 || cfg.FlushTimeout > 60*time.Second {
+		return nil, fmt.Errorf("assay: invalid FlushTimeout %v (must be between 0 and 60 seconds)", cfg.FlushTimeout)
+	}
 
 	// Apply defaults for zero values
 	if cfg.MaxDepth == 0 {
@@ -169,6 +173,9 @@ func NewSampler(backend StatsBackend, cfg Config) (*Sampler, error) {
 	}
 	if cfg.FlushInterval == 0 {
 		cfg.FlushInterval = 100 * time.Millisecond
+	}
+	if cfg.FlushTimeout == 0 {
+		cfg.FlushTimeout = 3 * time.Second
 	}
 
 	shards := make([]*schemaShard, numShards)
@@ -192,7 +199,6 @@ func NewSampler(backend StatsBackend, cfg Config) (*Sampler, error) {
 				}
 			},
 		},
-		quit:   make(chan struct{}),
 		ctx:    ctx,
 		cancel: cancel,
 	}
@@ -203,13 +209,29 @@ func NewSampler(backend StatsBackend, cfg Config) (*Sampler, error) {
 	return s, nil
 }
 
+type lastErr struct {
+	err error
+}
+
+func (s *Sampler) loadLastFlushErr() error {
+	val := s.lastFlushErr.Load()
+	if val == nil {
+		return nil
+	}
+	return val.(lastErr).err
+}
+
+func (s *Sampler) storeLastFlushErr(err error) {
+	s.lastFlushErr.Store(lastErr{err: err})
+}
+
 // Close flushes any pending stats and shuts down the background flushing worker.
 // It returns an error if the shutdown or final flush timed out or failed.
 func (s *Sampler) Close() error {
 	if s.closed.Swap(true) {
 		return errors.New("assay: sampler already closed")
 	}
-	close(s.quit)
+	s.cancel()
 
 	done := make(chan struct{})
 	go func() {
@@ -219,12 +241,8 @@ func (s *Sampler) Close() error {
 
 	select {
 	case <-done:
-		s.mu.Lock()
-		err := s.lastFlushErr
-		s.mu.Unlock()
-		return err
+		return s.loadLastFlushErr()
 	case <-time.After(5 * time.Second):
-		s.cancel() // Cancel any pending/hung context
 		return errors.New("assay: close timed out waiting for background flush to finish")
 	}
 }
@@ -232,7 +250,10 @@ func (s *Sampler) Close() error {
 // Flush forces an immediate synchronous flush of all locally accumulated statistics to the backend.
 // It returns an error if any flush operation failed.
 func (s *Sampler) Flush() error {
-	return s.flushAll()
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.flushAll(s.ctx)
 }
 
 // SamplerStats contains metrics and observability data for the Sampler.
@@ -240,6 +261,7 @@ type SamplerStats struct {
 	ActiveSchemas   int64
 	IngestedSamples uint64
 	DroppedSamples  uint64
+	RejectedSamples uint64
 	FlushSuccesses  uint64
 	FlushFailures   uint64
 }
@@ -250,6 +272,7 @@ func (s *Sampler) Stats() SamplerStats {
 		ActiveSchemas:   atomic.LoadInt64(&s.activeSchemas),
 		IngestedSamples: atomic.LoadUint64(&s.ingestedSamples),
 		DroppedSamples:  atomic.LoadUint64(&s.droppedSamples),
+		RejectedSamples: atomic.LoadUint64(&s.rejectedSamples),
 		FlushSuccesses:  atomic.LoadUint64(&s.flushSuccesses),
 		FlushFailures:   atomic.LoadUint64(&s.flushFailures),
 	}
@@ -273,11 +296,11 @@ func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
 // Sample parses the incoming payload and updates stats in the local buffer.
 // payload can be: []byte (JSON), map[string]any, or a Struct pointer.
 func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) error {
-	atomic.AddUint64(&s.ingestedSamples, 1)
 	if s.closed.Load() {
 		return ErrClosed
 	}
 	if payload == nil {
+		atomic.AddUint64(&s.rejectedSamples, 1)
 		return errors.New("nil payload")
 	}
 
@@ -320,22 +343,23 @@ func (s *Sampler) Sample(ctx context.Context, schemaID string, payload any) erro
 	switch val := payload.(type) {
 	case []byte:
 		if err := parseJSON(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
-			atomic.AddUint64(&s.droppedSamples, 1)
+			atomic.AddUint64(&s.rejectedSamples, 1)
 			return err
 		}
 	case string:
 		if err := parseJSON([]byte(val), stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
-			atomic.AddUint64(&s.droppedSamples, 1)
+			atomic.AddUint64(&s.rejectedSamples, 1)
 			return err
 		}
 	default:
 		// Go value, map, or struct
 		if err := parseGoValue(val, stack, 0, s.config.MaxDepth, s.config.MaxArrayElements, recordStats); err != nil {
-			atomic.AddUint64(&s.droppedSamples, 1)
+			atomic.AddUint64(&s.rejectedSamples, 1)
 			return err
 		}
 	}
 
+	atomic.AddUint64(&s.ingestedSamples, 1)
 	return nil
 }
 
@@ -478,14 +502,12 @@ func (s *Sampler) flushLoop() {
 
 	for {
 		select {
-		case <-s.quit:
-			err := s.flushAll()
-			s.mu.Lock()
-			s.lastFlushErr = err
-			s.mu.Unlock()
+		case <-s.ctx.Done():
+			err := s.flushAll(context.Background())
+			s.storeLastFlushErr(err)
 			return
 		case <-ticker.C:
-			_ = s.flushAll()
+			_ = s.flushAll(s.ctx)
 		}
 	}
 }
@@ -500,8 +522,8 @@ type fieldUpdate struct {
 	count uint64
 }
 
-func (s *Sampler) flushAll() error {
-	ctx, cancel := context.WithTimeout(s.ctx, 3*time.Second)
+func (s *Sampler) flushAll(parentCtx context.Context) error {
+	ctx, cancel := context.WithTimeout(parentCtx, s.config.FlushTimeout)
 	defer cancel()
 
 	typeNames := [6]string{"null", "string", "number", "boolean", "object", "array"}
