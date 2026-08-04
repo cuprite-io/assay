@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.6.2"
+const Version = "0.6.3"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -124,8 +124,9 @@ type schemaShard struct {
 }
 
 type schemaAccumulator struct {
-	mu    sync.RWMutex
-	stats map[string]*pathStats
+	mu      sync.RWMutex
+	stats   map[string]*pathStats
+	deleted atomic.Bool
 }
 
 type pathStats struct {
@@ -284,9 +285,20 @@ func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
 	h := fnvHash(schemaID) % numShards
 	shard := s.shards[h]
 	shard.mu.Lock()
-	if _, exists := shard.schemas[schemaID]; exists {
+	sa, exists := shard.schemas[schemaID]
+	if exists {
+		sa.deleted.Store(true)
 		delete(shard.schemas, schemaID)
-		atomic.AddInt64(&s.activeSchemas, -1)
+		for {
+			currentActive := atomic.LoadInt64(&s.activeSchemas)
+			nextActive := currentActive - 1
+			if nextActive < 0 {
+				nextActive = 0
+			}
+			if atomic.CompareAndSwapInt64(&s.activeSchemas, currentActive, nextActive) {
+				break
+			}
+		}
 	}
 	shard.mu.Unlock()
 
@@ -545,12 +557,20 @@ func (s *Sampler) flushAll(parentCtx context.Context) error {
 				continue
 			}
 
+			if sa.deleted.Load() {
+				continue
+			}
+
 			sa.mu.RLock()
 			statsRefs := make([]pathStatsRef, 0, len(sa.stats))
 			for path, stats := range sa.stats {
 				statsRefs = append(statsRefs, pathStatsRef{path: path, stats: stats})
 			}
 			sa.mu.RUnlock()
+
+			if sa.deleted.Load() {
+				continue
+			}
 
 			var updates []fieldUpdate
 			for _, ref := range statsRefs {
@@ -566,7 +586,14 @@ func (s *Sampler) flushAll(parentCtx context.Context) error {
 				}
 			}
 
+			if sa.deleted.Load() {
+				continue
+			}
+
 			for _, u := range updates {
+				if sa.deleted.Load() {
+					break
+				}
 				_, err := s.backend.MapIncrementBy(ctx, schemaID, u.field, float64(u.count))
 				if err != nil {
 					atomic.AddUint64(&s.flushFailures, 1)
@@ -921,6 +948,27 @@ func skipNumber(data []byte, pos int) (int, error) {
 	return pos, nil
 }
 
+func reflectTraverseField(v reflect.Value, stack *pathStack, key []byte, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
+	stack.push(key)
+	defer stack.pop()
+	return reflectTraverse(v, stack, depth, maxDepth, maxArrayElements, callback)
+}
+
+func reflectTraverseArray(v reflect.Value, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
+	stack.push([]byte("*"))
+	defer stack.pop()
+	limit := v.Len()
+	if limit > maxArrayElements {
+		limit = maxArrayElements
+	}
+	for i := 0; i < limit; i++ {
+		if err := reflectTraverse(v.Index(i), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func parseGoValue(val any, stack *pathStack, depth, maxDepth, maxArrayElements int, callback func(path string, dt DataType)) error {
 	return reflectTraverse(reflect.ValueOf(val), stack, depth, maxDepth, maxArrayElements, callback)
 }
@@ -963,39 +1011,24 @@ func reflectTraverse(v reflect.Value, stack *pathStack, depth, maxDepth, maxArra
 					name = parts[0]
 				}
 			}
-			stack.push([]byte(name))
-			if err := reflectTraverse(v.Field(i), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
-				stack.pop()
+			if err := reflectTraverseField(v.Field(i), stack, []byte(name), depth+1, maxDepth, maxArrayElements, callback); err != nil {
 				return err
 			}
-			stack.pop()
 		}
 	case reflect.Map:
 		callback(stack.current(), TypeObject)
 		for _, key := range v.MapKeys() {
 			if key.Kind() == reflect.String {
-				stack.push([]byte(key.String()))
-				if err := reflectTraverse(v.MapIndex(key), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
-					stack.pop()
+				if err := reflectTraverseField(v.MapIndex(key), stack, []byte(key.String()), depth+1, maxDepth, maxArrayElements, callback); err != nil {
 					return err
 				}
-				stack.pop()
 			}
 		}
 	case reflect.Slice, reflect.Array:
 		callback(stack.current(), TypeArray)
-		stack.push([]byte("*"))
-		limit := v.Len()
-		if limit > maxArrayElements {
-			limit = maxArrayElements
+		if err := reflectTraverseArray(v, stack, depth, maxDepth, maxArrayElements, callback); err != nil {
+			return err
 		}
-		for i := 0; i < limit; i++ {
-			if err := reflectTraverse(v.Index(i), stack, depth+1, maxDepth, maxArrayElements, callback); err != nil {
-				stack.pop()
-				return err
-			}
-		}
-		stack.pop()
 	case reflect.String:
 		callback(stack.current(), TypeString)
 	case reflect.Bool:
@@ -1096,15 +1129,15 @@ func buildSchemaTree(statsMap map[string]*PathStatsSnapshot, totalPayloads uint6
 			subpaths = append(subpaths, escapedPart.String())
 		}
 
-		currPath := ""
+		var currPathBuilder strings.Builder
 		for idx, part := range parts {
 			escapedPart := subpaths[idx]
-			parentPath := currPath
-			if currPath == "" {
-				currPath = escapedPart
-			} else {
-				currPath = currPath + "." + escapedPart
+			parentPath := currPathBuilder.String()
+			if idx > 0 {
+				currPathBuilder.WriteByte('.')
 			}
+			currPathBuilder.WriteString(escapedPart)
+			currPath := currPathBuilder.String()
 
 			if _, ok := nodes[currPath]; !ok {
 				node := &SchemaNode{

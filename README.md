@@ -83,6 +83,42 @@ func main() {
 
 ---
 
+## 📊 Observability & Metrics
+
+Assay provides built-in metrics and error hooks to monitor the sampler's performance and health:
+
+### Config.OnError Callback
+Provide an optional `OnError` callback in `Config` to handle background flush errors asynchronously:
+```go
+cfg := assay.Config{
+	OnError: func(err error) {
+		log.Printf("Assay background error: %v", err)
+	},
+}
+```
+
+### Retrieval of Live Stats
+Call `sampler.Stats()` to query real-time execution statistics:
+```go
+stats := sampler.Stats()
+fmt.Printf("Active Schemas: %d\n", stats.ActiveSchemas)
+fmt.Printf("Ingested Samples: %d\n", stats.IngestedSamples)
+fmt.Printf("Dropped Samples (Resource Limits): %d\n", stats.DroppedSamples)
+fmt.Printf("Rejected Samples (Parse Errors): %d\n", stats.RejectedSamples)
+fmt.Printf("Flush Successes: %d\n", stats.FlushSuccesses)
+fmt.Printf("Flush Failures: %d\n", stats.FlushFailures)
+```
+
+### Manual Flushing
+Use `sampler.Flush()` to force a synchronous flush of all accumulated stats in memory to the storage backend:
+```go
+if err := sampler.Flush(); err != nil {
+	log.Printf("Flush failed: %v", err)
+}
+```
+
+---
+
 ## 🔌 Decoupled Storage Interface (`StatsBackend`)
 
 To plug Assay into your cache layer, implement the `StatsBackend` interface. Because Go utilizes structural typing, any struct implementing `MapIncrementBy`, `MapGetAll`, and `Delete` fits this contract automatically.
