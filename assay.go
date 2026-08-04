@@ -15,7 +15,7 @@ import (
 )
 
 // Version is the current version of the assay library.
-const Version = "0.6.3"
+const Version = "1.0.0"
 
 // DataType represents the primitive JSON types.
 type DataType int
@@ -88,7 +88,7 @@ type Config struct {
 	MaxPaths         int           // Prevents Cardinality Explosion (Default: 1000)
 	MaxSchemas       int           // Prevents unbounded schema creation (Default: 1000)
 	MaxArrayElements int           // Max array/slice elements profiled (Default: 10)
-	FlushInterval    time.Duration // Interval for buffering writes to stats backend (Default: 100ms)
+	FlushInterval    time.Duration // Interval for buffering writes to stats backend (Default: 100ms. Set to -1 to disable periodic background flushing)
 	FlushTimeout     time.Duration // Timeout for individual backend writes (Default: 3s)
 	OnError          func(error)   // Optional callback to handle flush or background errors
 }
@@ -127,6 +127,7 @@ type schemaAccumulator struct {
 	mu      sync.RWMutex
 	stats   map[string]*pathStats
 	deleted atomic.Bool
+	flushMu sync.Mutex
 }
 
 type pathStats struct {
@@ -152,8 +153,8 @@ func NewSampler(backend StatsBackend, cfg Config) (*Sampler, error) {
 	if cfg.MaxArrayElements < 0 || cfg.MaxArrayElements > 10000 {
 		return nil, fmt.Errorf("assay: invalid MaxArrayElements %d (must be between 0 and 10,000)", cfg.MaxArrayElements)
 	}
-	if cfg.FlushInterval < 0 || cfg.FlushInterval > 60*time.Second {
-		return nil, fmt.Errorf("assay: invalid FlushInterval %v (must be between 0 and 60 seconds)", cfg.FlushInterval)
+	if (cfg.FlushInterval < 0 && cfg.FlushInterval != -1) || cfg.FlushInterval > 60*time.Second {
+		return nil, fmt.Errorf("assay: invalid FlushInterval %v (must be -1 or between 0 and 60 seconds)", cfg.FlushInterval)
 	}
 	if cfg.FlushTimeout < 0 || cfg.FlushTimeout > 60*time.Second {
 		return nil, fmt.Errorf("assay: invalid FlushTimeout %v (must be between 0 and 60 seconds)", cfg.FlushTimeout)
@@ -301,6 +302,11 @@ func (s *Sampler) DeleteSchema(ctx context.Context, schemaID string) error {
 		}
 	}
 	shard.mu.Unlock()
+
+	if exists {
+		sa.flushMu.Lock()
+		defer sa.flushMu.Unlock()
+	}
 
 	return s.backend.Delete(ctx, schemaID)
 }
@@ -509,6 +515,13 @@ func (s *Sampler) getSchemaAccumulator(schemaID string, createIfMissing bool) *s
 
 func (s *Sampler) flushLoop() {
 	defer s.wg.Done()
+	if s.config.FlushInterval == -1 {
+		<-s.ctx.Done()
+		err := s.flushAll(context.Background())
+		s.storeLastFlushErr(err)
+		return
+	}
+
 	ticker := time.NewTicker(s.config.FlushInterval)
 	defer ticker.Stop()
 
@@ -586,7 +599,9 @@ func (s *Sampler) flushAll(parentCtx context.Context) error {
 				}
 			}
 
+			sa.flushMu.Lock()
 			if sa.deleted.Load() {
+				sa.flushMu.Unlock()
 				continue
 			}
 
@@ -606,6 +621,7 @@ func (s *Sampler) flushAll(parentCtx context.Context) error {
 					atomic.AddUint64(&s.flushSuccesses, 1)
 				}
 			}
+			sa.flushMu.Unlock()
 		}
 	}
 

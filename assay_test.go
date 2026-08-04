@@ -647,6 +647,9 @@ func TestConfigValidation(t *testing.T) {
 		if cfg.FlushInterval != 100*time.Millisecond {
 			t.Errorf("expected FlushInterval 100ms, got %v", cfg.FlushInterval)
 		}
+		if cfg.FlushTimeout != 3*time.Second {
+			t.Errorf("expected FlushTimeout 3s, got %v", cfg.FlushTimeout)
+		}
 	})
 
 	t.Run("valid custom limits preserved", func(t *testing.T) {
@@ -655,7 +658,8 @@ func TestConfigValidation(t *testing.T) {
 			MaxPaths:         2000,
 			MaxSchemas:       500,
 			MaxArrayElements: 50,
-			FlushInterval:    500 * time.Millisecond,
+			FlushInterval:    -1, // Disabled background flushing
+			FlushTimeout:     5 * time.Second,
 		})
 		if err != nil {
 			t.Fatalf("failed to create sampler: %v", err)
@@ -675,8 +679,11 @@ func TestConfigValidation(t *testing.T) {
 		if cfg.MaxArrayElements != 50 {
 			t.Errorf("expected MaxArrayElements 50, got %d", cfg.MaxArrayElements)
 		}
-		if cfg.FlushInterval != 500*time.Millisecond {
-			t.Errorf("expected FlushInterval 500ms, got %v", cfg.FlushInterval)
+		if cfg.FlushInterval != -1 {
+			t.Errorf("expected FlushInterval -1, got %v", cfg.FlushInterval)
+		}
+		if cfg.FlushTimeout != 5*time.Second {
+			t.Errorf("expected FlushTimeout 5s, got %v", cfg.FlushTimeout)
 		}
 	})
 
@@ -690,8 +697,10 @@ func TestConfigValidation(t *testing.T) {
 			{MaxSchemas: 999_999},
 			{MaxArrayElements: -1},
 			{MaxArrayElements: 99_999},
-			{FlushInterval: -1 * time.Second},
+			{FlushInterval: -2 * time.Second}, // -1 is allowed, other negatives are not
 			{FlushInterval: 99 * time.Second},
+			{FlushTimeout: -1 * time.Second},
+			{FlushTimeout: 99 * time.Second},
 		}
 
 		for _, cfg := range invalidConfigs {
